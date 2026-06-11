@@ -1,8 +1,14 @@
+from contextlib import ExitStack
 import unittest
+from unittest.mock import patch
 
 import toycraft_commander as package_exports
 from toycraft_commander.feasibility import ToyCraftState, validate_intent_feasibility
-from toycraft_commander.executor import execute_toycraft_intent
+from toycraft_commander.executor import (
+    ToyCraftExecutedAction,
+    ToyCraftExecutionResult,
+    execute_toycraft_intent,
+)
 from toycraft_commander.interpreter import interpret_command_text
 from toycraft_commander.intents import (
     BuildStructureIntent,
@@ -16,6 +22,8 @@ from toycraft_commander.intents import (
     ValidationStatus,
 )
 from toycraft_commander.narrator import (
+    DEFAULT_STATE_NARRATOR,
+    KoreanStateNarrator,
     NarratorFeasibilityIssue,
     NarratorFeasibilityOutcome,
     NarratorResponseKind,
@@ -23,6 +31,7 @@ from toycraft_commander.narrator import (
     StateNarratorChangeSummary,
     StateNarratorDelta,
     StateNarratorInput,
+    StateNarratorInterface,
     StateNarratorResponse,
     StateNarratorResponseMetadata,
     StateNarratorSnapshot,
@@ -43,6 +52,8 @@ from toycraft_commander.resources import ResourceState, SupplyState
 
 class StateNarratorContractSurfaceTest(unittest.TestCase):
     def test_package_exports_state_narrator_contract(self) -> None:
+        self.assertIs(DEFAULT_STATE_NARRATOR, package_exports.DEFAULT_STATE_NARRATOR)
+        self.assertIs(KoreanStateNarrator, package_exports.KoreanStateNarrator)
         self.assertIs(NarratorFeasibilityIssue, package_exports.NarratorFeasibilityIssue)
         self.assertIs(NarratorFeasibilityOutcome, package_exports.NarratorFeasibilityOutcome)
         self.assertIs(NarratorResponseKind, package_exports.NarratorResponseKind)
@@ -50,6 +61,7 @@ class StateNarratorContractSurfaceTest(unittest.TestCase):
         self.assertIs(StateNarratorChangeSummary, package_exports.StateNarratorChangeSummary)
         self.assertIs(StateNarratorDelta, package_exports.StateNarratorDelta)
         self.assertIs(StateNarratorInput, package_exports.StateNarratorInput)
+        self.assertIs(StateNarratorInterface, package_exports.StateNarratorInterface)
         self.assertIs(StateNarratorResponse, package_exports.StateNarratorResponse)
         self.assertIs(
             StateNarratorResponseMetadata,
@@ -94,6 +106,35 @@ class StateNarratorContractSurfaceTest(unittest.TestCase):
             build_state_narrator_snapshot,
             package_exports.build_state_narrator_snapshot,
         )
+
+    def test_default_state_narrator_implements_narration_interface(self) -> None:
+        state = ToyCraftState(
+            resources=ResourceState(minerals=50, gas=0),
+            supply=SupplyState(used_supply=4, supply_capacity=15),
+            units={"SCV": 4},
+            structures={"Command Center": 1},
+        )
+        result = execute_toycraft_intent(
+            GatherResourceIntent(resource="minerals", worker_count=2, base="main"),
+            state,
+        )
+        narrator_input = build_execution_narrator_input(
+            result,
+            command_text="미네랄에 일꾼 두 기 붙여",
+        )
+
+        self.assertIsInstance(DEFAULT_STATE_NARRATOR, StateNarratorInterface)
+
+        response_from_input = DEFAULT_STATE_NARRATOR.narrate(narrator_input)
+        response_from_result = DEFAULT_STATE_NARRATOR.narrate_execution_result(
+            result,
+            command_text="미네랄에 일꾼 두 기 붙여",
+        )
+
+        self.assertIsInstance(response_from_input, StateNarratorResponse)
+        self.assertEqual("executed", response_from_input.metadata.response_kind)
+        self.assertIn("자원 채취", response_from_input.response_text)
+        self.assertEqual(response_from_input.response_text, response_from_result.response_text)
 
 
 class StateNarratorInputTest(unittest.TestCase):
@@ -635,6 +676,146 @@ class StateNarratorResponseTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "response_text"):
             build_state_narrator_response(narrator_input, response_text=" ")
+
+
+class StateNarratorBoundaryTest(unittest.TestCase):
+    def test_direct_narrator_input_renders_without_upstream_pipeline_calls(self) -> None:
+        before_state = StateNarratorSnapshot(
+            resources={"minerals": 100, "gas": 0},
+            supply={
+                "used_supply": 4,
+                "supply_capacity": 15,
+                "available_supply": 11,
+            },
+            units={"SCV": 4},
+            structures={"Command Center": 1},
+            busy_workers=0,
+            available_workers=4,
+        )
+        after_state = StateNarratorSnapshot(
+            resources={"minerals": 116, "gas": 0},
+            supply={
+                "used_supply": 4,
+                "supply_capacity": 15,
+                "available_supply": 11,
+            },
+            units={"SCV": 4},
+            structures={"Command Center": 1},
+            busy_workers=2,
+            available_workers=2,
+        )
+        narrator_input = StateNarratorInput(
+            command_text="미네랄 더 캐",
+            intent="GATHER_RESOURCE",
+            priority="high",
+            constraints=("scripted narration fixture",),
+            feasibility=NarratorFeasibilityOutcome(
+                executable=True,
+                status=ValidationStatus.EXECUTABLE,
+            ),
+            before_state=before_state,
+            after_state=after_state,
+            executed=True,
+            read_only=False,
+            state_changes=("minerals +16", "busy_workers +2"),
+            change_summary=StateNarratorChangeSummary(
+                resource_deltas=(
+                    StateNarratorDelta(
+                        name="resources.minerals",
+                        before=100,
+                        after=116,
+                        delta=16,
+                    ),
+                ),
+                entity_deltas=(
+                    StateNarratorDelta(
+                        name="busy_workers",
+                        before=0,
+                        after=2,
+                        delta=2,
+                    ),
+                    StateNarratorDelta(
+                        name="available_workers",
+                        before=4,
+                        after=2,
+                        delta=-2,
+                    ),
+                ),
+                raw_changes=("minerals +16", "busy_workers +2"),
+            ),
+        )
+
+        with _upstream_pipeline_calls_forbidden():
+            response = KoreanStateNarrator().narrate(narrator_input)
+
+        self.assertEqual("executed", response.metadata.response_kind)
+        self.assertEqual("GATHER_RESOURCE", response.metadata.intent)
+        self.assertEqual("high", response.metadata.priority)
+        self.assertEqual(("scripted narration fixture",), response.metadata.constraints)
+        self.assertEqual(("minerals +16", "busy_workers +2"), response.metadata.state_changes)
+        self.assertIn("자원 채취 지시", response.response_text)
+        self.assertIn("미네랄 +16", response.response_text)
+        self.assertIn("작업 중 SCV +2", response.response_text)
+        self.assertIn("현재 자원은 미네랄 116, 가스 0", response.response_text)
+
+    def test_scripted_execution_result_renders_without_rule_engine_or_pipeline_calls(
+        self,
+    ) -> None:
+        payload = TrainWorkerIntent(
+            count=1,
+            constraints=("scripted execution fixture",),
+        )
+        before_state = ToyCraftState(
+            resources=ResourceState(minerals=100, gas=0),
+            supply=SupplyState(used_supply=4, supply_capacity=15),
+            units={"SCV": 4},
+            structures={"Command Center": 1},
+        )
+        after_state = ToyCraftState(
+            resources=ResourceState(minerals=50, gas=0),
+            supply=SupplyState(used_supply=5, supply_capacity=15),
+            units={"SCV": 4},
+            structures={"Command Center": 1},
+            production_queues={"Command Center": 1},
+        )
+        scripted_result = ToyCraftExecutionResult(
+            intent="TRAIN_WORKER",
+            validation=IntentValidationResult(executable=True, payload=payload),
+            before_state=before_state,
+            after_state=after_state,
+            executed=True,
+            narration="Scripted execution outcome for narrator boundary testing.",
+            state_changes=(
+                "minerals -50",
+                "used_supply +1",
+                "production_queues.Command Center +1",
+            ),
+            executed_actions=(
+                ToyCraftExecutedAction(
+                    action_type="queue_unit",
+                    target="Command Center",
+                    amount=1,
+                    metadata={"unit": "SCV"},
+                ),
+            ),
+        )
+
+        with _upstream_pipeline_calls_forbidden():
+            response = build_execution_narrator_response(
+                scripted_result,
+                command_text="일꾼 하나 더 예약해",
+            )
+
+        self.assertEqual("executed", response.metadata.response_kind)
+        self.assertEqual("TRAIN_WORKER", response.metadata.intent)
+        self.assertEqual("일꾼 하나 더 예약해", response.metadata.command_text)
+        self.assertEqual(("scripted execution fixture",), response.metadata.constraints)
+        self.assertTrue(response.metadata.state_changed)
+        self.assertIn("생산 명령", response.response_text)
+        self.assertIn("Command Center에 SCV 1기 대기열", response.response_text)
+        self.assertIn("미네랄 -50", response.response_text)
+        self.assertIn("보급 +1", response.response_text)
+        self.assertIn("보급은 5/15", response.response_text)
 
 
 class MultiStateChangeCommandNarrationTest(unittest.TestCase):
@@ -1285,6 +1466,25 @@ def _expansion_ready_demo_state() -> ToyCraftState:
         claimed_locations=("main", "main base"),
         damaged_targets=("front bunker",),
     )
+
+
+def _upstream_pipeline_calls_forbidden() -> ExitStack:
+    stack = ExitStack()
+    for target in (
+        "toycraft_commander.interpreter.interpret_command_text",
+        "toycraft_commander.feasibility.validate_intent_feasibility",
+        "toycraft_commander.executor.execute_toycraft_intent",
+        "toycraft_commander.executor.ToyCraftRuleEngine.execute_intent",
+    ):
+        stack.enter_context(
+            patch(
+                target,
+                side_effect=AssertionError(
+                    f"narrator boundary test unexpectedly invoked {target}"
+                ),
+            )
+        )
+    return stack
 
 
 if __name__ == "__main__":

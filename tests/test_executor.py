@@ -1,12 +1,18 @@
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import toycraft_commander as package_exports
 from toycraft_commander.executor import (
+    DEFAULT_TOYCRAFT_EXECUTOR,
+    DEFAULT_TOYCRAFT_RULE_ENGINE,
     RESOURCE_GATHER_YIELD_PER_WORKER,
     TOYCRAFT_EXECUTION_RULES,
+    ToyCraftExecutor,
+    ToyCraftExecutorInterface,
     ToyCraftExecutedAction,
     ToyCraftExecutionResult,
+    ToyCraftRuleEngine,
+    ToyCraftRuleEngineInterface,
     ToyCraftStateDelta,
     ToyCraftStateDeltaSet,
     advance_toycraft_time,
@@ -76,8 +82,23 @@ class ToyCraftExecutorSurfaceTest(unittest.TestCase):
         self.assertIs(CommandFailureReason, package_exports.CommandFailureReason)
         self.assertIs(CommandFailureReport, package_exports.CommandFailureReport)
         self.assertIs(CommandFailureStage, package_exports.CommandFailureStage)
+        self.assertIs(
+            DEFAULT_TOYCRAFT_RULE_ENGINE,
+            package_exports.DEFAULT_TOYCRAFT_RULE_ENGINE,
+        )
+        self.assertIs(
+            DEFAULT_TOYCRAFT_EXECUTOR,
+            package_exports.DEFAULT_TOYCRAFT_EXECUTOR,
+        )
+        self.assertIs(ToyCraftExecutor, package_exports.ToyCraftExecutor)
+        self.assertIs(
+            ToyCraftExecutorInterface,
+            package_exports.ToyCraftExecutorInterface,
+        )
         self.assertIs(ToyCraftExecutedAction, package_exports.ToyCraftExecutedAction)
         self.assertIs(ToyCraftExecutionResult, package_exports.ToyCraftExecutionResult)
+        self.assertIs(ToyCraftRuleEngine, package_exports.ToyCraftRuleEngine)
+        self.assertIs(ToyCraftRuleEngineInterface, package_exports.ToyCraftRuleEngineInterface)
         self.assertIs(ToyCraftStateDelta, package_exports.ToyCraftStateDelta)
         self.assertIs(ToyCraftStateDeltaSet, package_exports.ToyCraftStateDeltaSet)
         self.assertIs(
@@ -123,6 +144,223 @@ class ToyCraftExecutorSurfaceTest(unittest.TestCase):
         self.assertIs(TOYCRAFT_EXECUTION_RULES["SUMMARIZE_STATE"], execute_summarize_state)
         self.assertIs(TOYCRAFT_EXECUTION_RULES["TRAIN_ARMY"], execute_train_army)
         self.assertIs(TOYCRAFT_EXECUTION_RULES["TRAIN_WORKER"], execute_train_worker)
+
+    def test_default_rule_engine_implements_execution_interface(self) -> None:
+        state = ToyCraftState(
+            resources=ResourceState(minerals=50, gas=0),
+            units={"SCV": 4},
+            structures={"Command Center": 1},
+        )
+
+        self.assertIsInstance(DEFAULT_TOYCRAFT_RULE_ENGINE, ToyCraftRuleEngineInterface)
+
+        result = DEFAULT_TOYCRAFT_RULE_ENGINE.execute_intent(
+            GatherResourceIntent(resource="minerals", worker_count=1, base="main"),
+            state,
+        )
+
+        self.assertTrue(result.executed)
+        self.assertEqual(58, result.after_state.resources.minerals)
+
+    def test_default_executor_applies_effects_through_executor_interface(self) -> None:
+        state = ToyCraftState(
+            resources=ResourceState(minerals=50, gas=0),
+            units={"SCV": 4},
+            structures={"Command Center": 1},
+        )
+
+        self.assertIsInstance(DEFAULT_TOYCRAFT_EXECUTOR, ToyCraftExecutorInterface)
+
+        result = DEFAULT_TOYCRAFT_EXECUTOR.apply_effects(
+            GatherResourceIntent(resource="minerals", worker_count=1, base="main"),
+            state,
+        )
+
+        self.assertTrue(result.executed)
+        self.assertEqual(58, result.after_state.resources.minerals)
+
+    def test_executor_adapter_delegates_to_configured_rule_engine(self) -> None:
+        payload = GatherResourceIntent(resource="minerals", worker_count=1, base="main")
+        state = ToyCraftState()
+        execution_result = object()
+        time_result = object()
+
+        class RecordingRuleEngine:
+            def __init__(self) -> None:
+                self.execute_calls = []
+                self.advance_calls = []
+
+            def execute_intent(self, received_payload, received_state):
+                self.execute_calls.append((received_payload, received_state))
+                return execution_result
+
+            def advance_time(self, received_state, seconds):
+                self.advance_calls.append((received_state, seconds))
+                return time_result
+
+        rule_engine = RecordingRuleEngine()
+        executor = ToyCraftExecutor(rule_engine=rule_engine)
+
+        self.assertIs(execution_result, executor.apply_effects(payload, state))
+        self.assertIs(time_result, executor.advance_time(state, 9))
+        self.assertEqual([(payload, state)], rule_engine.execute_calls)
+        self.assertEqual([(state, 9)], rule_engine.advance_calls)
+
+    def test_rule_engine_rejects_before_state_transition_when_validator_blocks(self) -> None:
+        state = ToyCraftState(
+            resources=ResourceState(minerals=50, gas=0),
+            units={"SCV": 4},
+            structures={"Command Center": 1},
+        )
+
+        result = ToyCraftRuleEngine().execute_intent(
+            GatherResourceIntent(resource="gas", worker_count=1, base="main"),
+            state,
+        )
+
+        self.assertFalse(result.executed)
+        self.assertEqual(state, result.before_state)
+        self.assertEqual(state, result.after_state)
+        self.assertEqual((), result.executed_actions)
+
+
+class ToyCraftRuleEngineBoundaryTest(unittest.TestCase):
+    def test_rule_engine_executes_typed_economy_intent_without_parser_or_state_narrator(
+        self,
+    ) -> None:
+        state = ToyCraftState(
+            resources=ResourceState(minerals=80, gas=0),
+            supply=SupplyState(used_supply=6, supply_capacity=15),
+            units={"SCV": 6},
+            structures={"Command Center": 1},
+            busy_workers=1,
+            claimed_locations=("main", "main base"),
+        )
+        intent = GatherResourceIntent(resource="minerals", worker_count=3, base="main")
+        rule_engine = ToyCraftRuleEngine()
+
+        with (
+            patch(
+                "toycraft_commander.interpreter.interpret_command_text",
+                side_effect=AssertionError("rule engine must not parse command text"),
+            ) as parse_spy,
+            patch(
+                "toycraft_commander.narrator.KoreanStateNarrator.narrate_execution_result",
+                side_effect=AssertionError("rule engine must not invoke StateNarrator"),
+            ) as narrator_spy,
+        ):
+            result = rule_engine.execute_intent(intent, state)
+
+        self.assertTrue(result.executed)
+        self.assertFalse(result.read_only)
+        self.assertEqual("GATHER_RESOURCE", result.intent)
+        self.assertEqual(state, result.before_state)
+        self.assertEqual(104, result.after_state.resources.minerals)
+        self.assertEqual(4, result.after_state.busy_workers)
+        self.assertEqual(
+            ("assign_workers", "gather_resource"),
+            tuple(action.action_type for action in result.executed_actions),
+        )
+        self.assertIn(
+            ToyCraftStateDelta(
+                path="resources.minerals",
+                before=80,
+                after=104,
+                delta=24,
+            ),
+            result.state_delta.changes,
+        )
+        parse_spy.assert_not_called()
+        narrator_spy.assert_not_called()
+
+    def test_rule_engine_executes_typed_production_intent_without_parser_or_state_narrator(
+        self,
+    ) -> None:
+        state = ToyCraftState(
+            resources=ResourceState(minerals=300, gas=50),
+            supply=SupplyState(used_supply=8, supply_capacity=20),
+            units={"SCV": 6, "Marine": 2},
+            structures={"Command Center": 1, "Barracks": 1},
+            production_queues={"Barracks": 1},
+        )
+        intent = TrainArmyIntent(unit_type="Marine", count=2)
+        rule_engine = ToyCraftRuleEngine()
+
+        with (
+            patch(
+                "toycraft_commander.interpreter.interpret_command",
+                side_effect=AssertionError("rule engine must not parse command text"),
+            ) as parse_spy,
+            patch(
+                "toycraft_commander.narrator.KoreanStateNarrator.narrate_execution_result",
+                side_effect=AssertionError("rule engine must not invoke StateNarrator"),
+            ) as narrator_spy,
+        ):
+            result = rule_engine.execute_intent(intent, state)
+
+        self.assertTrue(result.executed)
+        self.assertEqual(200, result.after_state.resources.minerals)
+        self.assertEqual(10, result.after_state.supply.used_supply)
+        self.assertEqual({"Barracks": 3}, result.after_state.production_queues)
+        self.assertEqual(
+            ("spend_resources", "reserve_supply", "queue_production"),
+            tuple(action.action_type for action in result.executed_actions),
+        )
+        self.assertIn(
+            ToyCraftStateDelta(
+                path="production_queues.Barracks",
+                before=1,
+                after=3,
+                delta=2,
+            ),
+            result.state_delta.changes,
+        )
+        parse_spy.assert_not_called()
+        narrator_spy.assert_not_called()
+
+    def test_rule_engine_executes_typed_combat_intent_without_parser_or_state_narrator(
+        self,
+    ) -> None:
+        state = ToyCraftState(
+            resources=ResourceState(minerals=300, gas=50),
+            supply=SupplyState(used_supply=10, supply_capacity=23),
+            units={"SCV": 6, "Marine": 4, "Vulture": 1},
+            structures={"Command Center": 1, "Barracks": 1, "Bunker": 1},
+            target_damage={"enemy mineral line": 12},
+        )
+        intent = HarassIntent(target="enemy mineral line", unit_group="2 Marines")
+        rule_engine = ToyCraftRuleEngine()
+
+        with (
+            patch(
+                "toycraft_commander.interpreter.interpret_command_text",
+                side_effect=AssertionError("rule engine must not parse command text"),
+            ) as parse_spy,
+            patch(
+                "toycraft_commander.narrator.KoreanStateNarrator.narrate_execution_result",
+                side_effect=AssertionError("rule engine must not invoke StateNarrator"),
+            ) as narrator_spy,
+        ):
+            result = rule_engine.execute_intent(intent, state)
+
+        self.assertTrue(result.executed)
+        self.assertEqual({"Marine": "enemy mineral line"}, result.after_state.unit_positions)
+        self.assertEqual(24, result.after_state.target_damage["enemy mineral line"])
+        self.assertEqual(
+            ("move_units", "apply_damage"),
+            tuple(action.action_type for action in result.executed_actions),
+        )
+        self.assertIn(
+            ToyCraftStateDelta(
+                path="target_damage.enemy mineral line",
+                before=12,
+                after=24,
+                delta=12,
+            ),
+            result.state_delta.changes,
+        )
+        parse_spy.assert_not_called()
+        narrator_spy.assert_not_called()
 
 
 class ToyCraftStructuredExecutionOutcomeTest(unittest.TestCase):

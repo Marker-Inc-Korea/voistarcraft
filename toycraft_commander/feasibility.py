@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Final, Protocol, runtime_checkable
 
 from toycraft_commander.intents import (
     BuildStructureIntent,
@@ -53,6 +53,18 @@ from toycraft_commander.units import (
 
 
 IntentFeasibilityRule = Callable[[IntentPayload, "ToyCraftState"], tuple[FeasibilityIssue, ...]]
+
+
+@runtime_checkable
+class IntentFeasibilityValidator(Protocol):
+    """Boundary for checking whether an Intent DSL payload may mutate state."""
+
+    def validate_intent(
+        self,
+        payload: IntentPayload | Mapping[str, object],
+        state: "ToyCraftState",
+    ) -> IntentValidationResult:
+        """Return executable or rejected validation without mutating state."""
 
 EXTRA_PHASE_ZERO_STRUCTURE_NAMES: Final[tuple[str, ...]] = ("Bunker", "Command Center")
 PHASE_ZERO_STRUCTURE_NAMES: Final[tuple[str, ...]] = (
@@ -303,40 +315,63 @@ class ToyCraftState:
         return sum(1 for order in self.production_orders if order.producer == resolved_name)
 
 
+@dataclass(frozen=True)
+class ToyCraftFeasibilityValidator:
+    """Rule-table-backed Phase 0 feasibility validator implementation."""
+
+    rules: Mapping[IntentName, IntentFeasibilityRule] = field(
+        default_factory=lambda: INTENT_FEASIBILITY_RULES
+    )
+
+    def validate_intent(
+        self,
+        payload: IntentPayload | Mapping[str, object],
+        state: ToyCraftState,
+    ) -> IntentValidationResult:
+        """Validate a typed or raw Intent DSL payload against ToyCraft state."""
+
+        if not isinstance(state, ToyCraftState):
+            raise TypeError("state must be a ToyCraftState.")
+
+        typed_payload_result = _coerce_intent_payload(payload)
+        if not typed_payload_result.executable:
+            return typed_payload_result
+
+        typed_payload = typed_payload_result.payload
+        if typed_payload is None:
+            raise RuntimeError("executable payload validation returned no payload.")
+
+        issues = (
+            *_validate_constraint_conflicts(typed_payload),
+            *_validate_patrol_constraints(typed_payload),
+            *self.get_rule(typed_payload.intent)(typed_payload, state),
+        )
+        if issues:
+            return _rejected_for_issues(typed_payload, issues)
+        return IntentValidationResult(executable=True, payload=typed_payload)
+
+    def get_rule(self, intent: IntentName) -> IntentFeasibilityRule:
+        """Return the configured feasibility rule for one canonical intent."""
+
+        try:
+            return self.rules[intent]
+        except KeyError as exc:
+            raise KeyError(f"Unsupported ToyCraft feasibility rule: {intent}") from exc
+
+
+def get_intent_feasibility_rule(intent: IntentName) -> IntentFeasibilityRule:
+    """Return the state feasibility rule for one canonical intent."""
+
+    return DEFAULT_FEASIBILITY_VALIDATOR.get_rule(intent)
+
+
 def validate_intent_feasibility(
     payload: IntentPayload | Mapping[str, object],
     state: ToyCraftState,
 ) -> IntentValidationResult:
     """Validate a typed or raw Intent DSL payload against ToyCraft state."""
 
-    if not isinstance(state, ToyCraftState):
-        raise TypeError("state must be a ToyCraftState.")
-
-    typed_payload_result = _coerce_intent_payload(payload)
-    if not typed_payload_result.executable:
-        return typed_payload_result
-
-    typed_payload = typed_payload_result.payload
-    if typed_payload is None:
-        raise RuntimeError("executable payload validation returned no payload.")
-
-    issues = (
-        *_validate_constraint_conflicts(typed_payload),
-        *_validate_patrol_constraints(typed_payload),
-        *get_intent_feasibility_rule(typed_payload.intent)(typed_payload, state),
-    )
-    if issues:
-        return _rejected_for_issues(typed_payload, issues)
-    return IntentValidationResult(executable=True, payload=typed_payload)
-
-
-def get_intent_feasibility_rule(intent: IntentName) -> IntentFeasibilityRule:
-    """Return the state feasibility rule for one canonical intent."""
-
-    try:
-        return INTENT_FEASIBILITY_RULES[intent]
-    except KeyError as exc:
-        raise KeyError(f"Unsupported ToyCraft feasibility rule: {intent}") from exc
+    return DEFAULT_FEASIBILITY_VALIDATOR.validate_intent(payload, state)
 
 
 def _validate_gather_resource(
@@ -639,6 +674,10 @@ INTENT_FEASIBILITY_RULES: Final[dict[IntentName, IntentFeasibilityRule]] = {
     "EXPAND": _validate_expand,
     "HARASS": _validate_harass,
 }
+
+DEFAULT_FEASIBILITY_VALIDATOR: Final[IntentFeasibilityValidator] = (
+    ToyCraftFeasibilityValidator()
+)
 
 
 def _coerce_intent_payload(

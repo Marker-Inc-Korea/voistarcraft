@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from typing import Final
+from typing import Final, Protocol, runtime_checkable
 
 from toycraft_commander.failure import (
     CommandFailureReport,
@@ -14,9 +14,10 @@ from toycraft_commander.failure import (
 )
 from toycraft_commander.feasibility import (
     ConstructionOrder,
+    DEFAULT_FEASIBILITY_VALIDATOR,
+    IntentFeasibilityValidator,
     ProductionOrder,
     ToyCraftState,
-    validate_intent_feasibility,
 )
 from toycraft_commander.intents import (
     BuildStructureIntent,
@@ -81,6 +82,36 @@ COMBAT_TARGET_COUNTER_DAMAGE: Final[dict[str, int]] = {
     "enemy mineral line": 12,
     "enemy main": 45,
 }
+
+
+@runtime_checkable
+class ToyCraftRuleEngineInterface(Protocol):
+    """Executor boundary for rule-based ToyCraft state transitions."""
+
+    def execute_intent(
+        self,
+        payload: IntentPayload | Mapping[str, object],
+        state: ToyCraftState,
+    ) -> "ToyCraftExecutionResult":
+        """Validate and execute one Intent DSL payload against a state snapshot."""
+
+    def advance_time(self, state: ToyCraftState, seconds: int) -> "ToyCraftExecutionResult":
+        """Advance deterministic ToyCraft timers and materialize completions."""
+
+
+@runtime_checkable
+class ToyCraftExecutorInterface(Protocol):
+    """SC2-ready abstraction for applying execution effects to a game state."""
+
+    def apply_effects(
+        self,
+        payload: IntentPayload | Mapping[str, object],
+        state: ToyCraftState,
+    ) -> "ToyCraftExecutionResult":
+        """Apply one feasible Intent DSL payload through an execution backend."""
+
+    def advance_time(self, state: ToyCraftState, seconds: int) -> "ToyCraftExecutionResult":
+        """Advance backend time and return the resulting state transition."""
 
 
 @dataclass(frozen=True)
@@ -239,22 +270,46 @@ class _ResolvedCombatGroup:
     count: int
 
 
+@dataclass(frozen=True)
+class ToyCraftRuleEngine:
+    """Default deterministic Phase 0 rule engine implementation."""
+
+    validator: IntentFeasibilityValidator = DEFAULT_FEASIBILITY_VALIDATOR
+    execution_rules: Mapping[IntentName, ToyCraftExecutionRule] = field(
+        default_factory=lambda: TOYCRAFT_EXECUTION_RULES
+    )
+
+    def execute_intent(
+        self,
+        payload: IntentPayload | Mapping[str, object],
+        state: ToyCraftState,
+    ) -> ToyCraftExecutionResult:
+        """Validate and execute a ToyCraft intent through the Phase 0 boundary."""
+
+        validation = self.validator.validate_intent(payload, state)
+        if not validation.executable:
+            return _rejected_execution_result(validation, state, payload)
+        if validation.payload is None:
+            raise RuntimeError("executable validation returned no payload.")
+
+        rule = self.execution_rules.get(validation.payload.intent)
+        if rule is None:
+            return _unimplemented_execution_result(validation.payload.intent, validation, state)
+        return rule(validation.payload, state)
+
+    def advance_time(self, state: ToyCraftState, seconds: int) -> ToyCraftExecutionResult:
+        """Advance deterministic ToyCraft timers through the rule-engine boundary."""
+
+        return advance_toycraft_time(state, seconds)
+
+
 def execute_toycraft_intent(
     payload: IntentPayload | Mapping[str, object],
     state: ToyCraftState,
 ) -> ToyCraftExecutionResult:
     """Validate and execute a ToyCraft intent through the Phase 0 boundary."""
 
-    validation = validate_intent_feasibility(payload, state)
-    if not validation.executable:
-        return _rejected_execution_result(validation, state, payload)
-    if validation.payload is None:
-        raise RuntimeError("executable validation returned no payload.")
-
-    rule = TOYCRAFT_EXECUTION_RULES.get(validation.payload.intent)
-    if rule is None:
-        return _unimplemented_execution_result(validation.payload.intent, validation, state)
-    return rule(validation.payload, state)
+    return DEFAULT_TOYCRAFT_RULE_ENGINE.execute_intent(payload, state)
 
 
 def execute_summarize_state(
@@ -635,9 +690,9 @@ def build_commander_response(
     """Return the final narration string that should be shown to the commander."""
 
     if result.executed:
-        from toycraft_commander.narrator import build_execution_narrator_response
+        from toycraft_commander.narrator import DEFAULT_STATE_NARRATOR
 
-        return build_execution_narrator_response(
+        return DEFAULT_STATE_NARRATOR.narrate_execution_result(
             result,
             command_text=command_text,
         ).response_text
@@ -1572,3 +1627,29 @@ TOYCRAFT_EXECUTION_RULES: Final[dict[IntentName, ToyCraftExecutionRule]] = {
     "TRAIN_ARMY": execute_train_army,
     "TRAIN_WORKER": execute_train_worker,
 }
+
+DEFAULT_TOYCRAFT_RULE_ENGINE: Final[ToyCraftRuleEngineInterface] = ToyCraftRuleEngine()
+
+
+@dataclass(frozen=True)
+class ToyCraftExecutor:
+    """Default Phase 0 executor adapter for applying ToyCraft execution effects."""
+
+    rule_engine: ToyCraftRuleEngineInterface = DEFAULT_TOYCRAFT_RULE_ENGINE
+
+    def apply_effects(
+        self,
+        payload: IntentPayload | Mapping[str, object],
+        state: ToyCraftState,
+    ) -> ToyCraftExecutionResult:
+        """Apply one Intent DSL payload through the configured rule engine."""
+
+        return self.rule_engine.execute_intent(payload, state)
+
+    def advance_time(self, state: ToyCraftState, seconds: int) -> ToyCraftExecutionResult:
+        """Advance deterministic ToyCraft time through the configured rule engine."""
+
+        return self.rule_engine.advance_time(state, seconds)
+
+
+DEFAULT_TOYCRAFT_EXECUTOR: Final[ToyCraftExecutorInterface] = ToyCraftExecutor()

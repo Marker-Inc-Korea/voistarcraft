@@ -17,6 +17,10 @@ DEFAULT_ACTIONABLE_ALTERNATIVE = (
     "명령을 하나로 구체화해 다시 내려 주세요. "
     "예: 상태 알려줘 / 일꾼 계속 찍어 / 본진에 배럭 지어."
 )
+DEFAULT_RULE_EXECUTION_ALTERNATIVE = (
+    "상태를 확인한 뒤 더 단순한 ToyCraft MVP 명령으로 다시 시도해 주세요. "
+    "예: 상태 알려줘 / 본진 방어해."
+)
 
 
 class CommandFailureStage(StrEnum):
@@ -136,7 +140,9 @@ def build_parsing_failure_report(
 ) -> CommandFailureReport:
     """Build a structured report for a command that failed interpretation."""
 
-    alternative = " / ".join(alternatives) if alternatives else DEFAULT_ACTIONABLE_ALTERNATIVE
+    alternative = (
+        " / ".join(alternatives) if alternatives else DEFAULT_ACTIONABLE_ALTERNATIVE
+    )
     reason_metadata = {"alternatives": list(alternatives)}
     if metadata:
         reason_metadata.update(metadata)
@@ -194,6 +200,34 @@ def build_validation_failure_report(
     return CommandFailureReport(
         stage=stage,
         reasons=reasons,
+        command_text=command_text,
+        intent=intent,
+    )
+
+
+def build_rule_execution_failure_report(
+    *,
+    command_text: str,
+    intent: str,
+    code: str | Enum,
+    message: str,
+    alternative: str = DEFAULT_RULE_EXECUTION_ALTERNATIVE,
+    fields: tuple[str, ...] = (),
+    metadata: Mapping[str, object] | None = None,
+) -> CommandFailureReport:
+    """Build a structured report for executor-stage failures."""
+
+    reason = CommandFailureReason(
+        stage=CommandFailureStage.RULE_EXECUTION,
+        code=_string_code(code),
+        message=message,
+        alternative=alternative,
+        fields=fields,
+        metadata={} if metadata is None else metadata,
+    )
+    return CommandFailureReport(
+        stage=CommandFailureStage.RULE_EXECUTION,
+        reasons=(reason,),
         command_text=command_text,
         intent=intent,
     )

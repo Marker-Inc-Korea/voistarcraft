@@ -1,13 +1,18 @@
+from contextlib import ExitStack, contextmanager
 import unittest
+from unittest.mock import patch
 
 import toycraft_commander as package_exports
 from toycraft_commander.feasibility import (
     ConstructionOrder,
+    DEFAULT_FEASIBILITY_VALIDATOR,
     INTENT_FEASIBILITY_RULES,
+    IntentFeasibilityValidator,
     PHASE_ZERO_STRUCTURE_COSTS,
     PHASE_ZERO_STRUCTURE_NAMES,
     PRODUCTION_QUEUE_CAPACITY_PER_PRODUCER,
     ToyCraftState,
+    ToyCraftFeasibilityValidator,
     get_intent_feasibility_rule,
     validate_intent_feasibility,
 )
@@ -191,7 +196,13 @@ class IntentFeasibilityDispatchTest(unittest.TestCase):
 
     def test_package_exports_feasibility_surface(self) -> None:
         self.assertIs(ToyCraftState, package_exports.ToyCraftState)
+        self.assertIs(
+            DEFAULT_FEASIBILITY_VALIDATOR,
+            package_exports.DEFAULT_FEASIBILITY_VALIDATOR,
+        )
         self.assertIs(INTENT_FEASIBILITY_RULES, package_exports.INTENT_FEASIBILITY_RULES)
+        self.assertIs(IntentFeasibilityValidator, package_exports.IntentFeasibilityValidator)
+        self.assertIs(ToyCraftFeasibilityValidator, package_exports.ToyCraftFeasibilityValidator)
         self.assertIs(validate_intent_feasibility, package_exports.validate_intent_feasibility)
         self.assertIs(get_intent_feasibility_rule, package_exports.get_intent_feasibility_rule)
         self.assertEqual(PHASE_ZERO_STRUCTURE_NAMES, package_exports.PHASE_ZERO_STRUCTURE_NAMES)
@@ -200,6 +211,18 @@ class IntentFeasibilityDispatchTest(unittest.TestCase):
             PRODUCTION_QUEUE_CAPACITY_PER_PRODUCER,
             package_exports.PRODUCTION_QUEUE_CAPACITY_PER_PRODUCER,
         )
+
+    def test_default_validator_implements_feasibility_interface(self) -> None:
+        state = ready_state()
+        payload = TrainWorkerIntent(count=1)
+
+        self.assertIsInstance(DEFAULT_FEASIBILITY_VALIDATOR, IntentFeasibilityValidator)
+
+        result = DEFAULT_FEASIBILITY_VALIDATOR.validate_intent(payload, state)
+
+        self.assertTrue(result.executable)
+        self.assertEqual(payload, result.payload)
+        self.assertEqual(state, ready_state())
 
     def test_invalid_raw_payload_returns_shared_payload_validation_result(self) -> None:
         result = validate_intent_feasibility(
@@ -211,6 +234,115 @@ class IntentFeasibilityDispatchTest(unittest.TestCase):
         self.assertEqual(ValidationStatus.REJECTED, result.status)
         self.assertEqual(FeasibilityErrorReason.MISSING_REQUIRED_FIELD, result.reason_code)
         self.assertIn("unit_type", result.missing_fields)
+
+
+class IntentFeasibilityBoundaryTest(unittest.TestCase):
+    def test_validator_runs_direct_rule_against_supplied_intent_and_state_only(
+        self,
+    ) -> None:
+        payload = SummarizeStateIntent(priority="high")
+        state = ready_state()
+        calls = []
+
+        def recording_rule(received_payload, received_state):
+            calls.append((received_payload is payload, received_state is state))
+            return ()
+
+        validator = ToyCraftFeasibilityValidator(rules={payload.intent: recording_rule})
+
+        with self._forbidden_pipeline_boundaries() as boundaries:
+            result = validator.validate_intent(payload, state)
+
+        self.assertTrue(result.executable)
+        self.assertEqual(ValidationStatus.EXECUTABLE, result.status)
+        self.assertIs(payload, result.payload)
+        self.assertEqual([(True, True)], calls)
+        self.assertEqual(state, ready_state())
+        for boundary in boundaries:
+            boundary.assert_not_called()
+
+    def test_validator_rejects_typed_intent_without_parsing_execution_or_narration(
+        self,
+    ) -> None:
+        payload = TrainWorkerIntent(count=2)
+        state = ToyCraftState(
+            resources=ResourceState(minerals=75, gas=0),
+            supply=SupplyState(used_supply=4, supply_capacity=15),
+            units={"SCV": 4},
+            structures={"Command Center": 1},
+        )
+
+        with self._forbidden_pipeline_boundaries() as boundaries:
+            result = ToyCraftFeasibilityValidator().validate_intent(payload, state)
+
+        self.assertFalse(result.executable)
+        self.assertEqual(ValidationStatus.REJECTED, result.status)
+        self.assertIs(payload, result.payload)
+        self.assertEqual(FeasibilityErrorReason.INSUFFICIENT_MINERALS, result.reason_code)
+        self.assertIn("Need 25 more minerals", result.reason)
+        self.assertTrue(result.alternative.strip())
+        self.assertEqual(
+            ToyCraftState(
+                resources=ResourceState(minerals=75, gas=0),
+                supply=SupplyState(used_supply=4, supply_capacity=15),
+                units={"SCV": 4},
+                structures={"Command Center": 1},
+            ),
+            state,
+        )
+        for boundary in boundaries:
+            boundary.assert_not_called()
+
+    @contextmanager
+    def _forbidden_pipeline_boundaries(self):
+        def forbidden_stage(*_args, **_kwargs):
+            raise AssertionError(
+                "validator boundary must not invoke parsing, execution, or narration"
+            )
+
+        patched_boundaries = (
+            patch(
+                "toycraft_commander.interpreter.interpret_command",
+                side_effect=forbidden_stage,
+            ),
+            patch(
+                "toycraft_commander.interpreter.CommandInterpreter.interpret",
+                side_effect=forbidden_stage,
+            ),
+            patch(
+                "toycraft_commander.feasibility.validate_intent_payload",
+                side_effect=forbidden_stage,
+            ),
+            patch(
+                "toycraft_commander.executor.execute_toycraft_intent",
+                side_effect=forbidden_stage,
+            ),
+            patch(
+                "toycraft_commander.executor.ToyCraftExecutor.apply_effects",
+                side_effect=forbidden_stage,
+            ),
+            patch(
+                "toycraft_commander.narrator.build_execution_narrator_response",
+                side_effect=forbidden_stage,
+            ),
+            patch(
+                "toycraft_commander.narrator.build_rejected_narrator_input",
+                side_effect=forbidden_stage,
+            ),
+            patch(
+                "toycraft_commander.narrator.build_state_narrator_response",
+                side_effect=forbidden_stage,
+            ),
+            patch(
+                "toycraft_commander.narrator.KoreanStateNarrator.narrate",
+                side_effect=forbidden_stage,
+            ),
+        )
+        with ExitStack() as stack:
+            yield tuple(
+                stack.enter_context(boundary)
+                for boundary in patched_boundaries
+            )
 
 
 class EconomyProductionFeasibilityTest(unittest.TestCase):

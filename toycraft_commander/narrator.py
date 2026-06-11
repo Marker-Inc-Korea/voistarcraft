@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, Protocol, runtime_checkable
 
 from toycraft_commander.feasibility import ToyCraftState
 from toycraft_commander.intents import (
@@ -463,6 +463,48 @@ class StateNarratorResponse:
                 else self.blocked_command.to_dict()
             ),
         }
+
+
+@runtime_checkable
+class StateNarratorInterface(Protocol):
+    """Boundary for producing commander-facing narration from execution outcomes."""
+
+    def narrate(self, narrator_input: StateNarratorInput) -> StateNarratorResponse:
+        """Render a stable narrator input into a user-facing response contract."""
+
+    def narrate_execution_result(
+        self,
+        result: ToyCraftExecutionResult,
+        *,
+        command_text: str = "",
+    ) -> StateNarratorResponse:
+        """Render a completed executor result into a user-facing response contract."""
+
+
+@dataclass(frozen=True)
+class KoreanStateNarrator:
+    """Default Korean Phase 0 narrator implementation for ToyCraft outcomes."""
+
+    def narrate(self, narrator_input: StateNarratorInput) -> StateNarratorResponse:
+        """Produce a Korean commander-facing response from stable narrator input."""
+
+        return build_state_narrator_response(narrator_input)
+
+    def narrate_execution_result(
+        self,
+        result: ToyCraftExecutionResult,
+        *,
+        command_text: str = "",
+    ) -> StateNarratorResponse:
+        """Produce a Korean commander-facing response from an execution result."""
+
+        return build_execution_narrator_response(
+            result,
+            command_text=command_text,
+        )
+
+
+DEFAULT_STATE_NARRATOR: Final[StateNarratorInterface] = KoreanStateNarrator()
 
 
 def build_feasibility_narrator_outcome(

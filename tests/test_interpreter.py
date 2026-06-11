@@ -1,6 +1,7 @@
 from collections import Counter
 import json
 import unittest
+from unittest.mock import patch
 
 import toycraft_commander as package_exports
 from toycraft_commander.interpreter import (
@@ -97,6 +98,7 @@ from toycraft_commander.intents import (
     HarassIntent,
     INTENT_DSL_FORMAT_VERSION,
     INTENT_DSL_PAYLOAD_KEY,
+    INTENT_PAYLOAD_TYPES,
     RepairIntent,
     ScoutIntent,
     SummarizeStateIntent,
@@ -725,6 +727,79 @@ class KoreanInterpreterMappingTest(unittest.TestCase):
             minimum_expected_matches,
             f"{matched_count}/20 corpus commands matched; mismatches={mismatches}",
         )
+
+    def test_parser_boundary_maps_korean_commands_without_validation_or_execution(
+        self,
+    ) -> None:
+        def forbidden_stage(*_args, **_kwargs):
+            raise AssertionError(
+                "parser boundary must not invoke validation or execution"
+            )
+
+        patched_boundaries = (
+            patch(
+                "toycraft_commander.intents.validate_intent_payload",
+                side_effect=forbidden_stage,
+            ),
+            patch(
+                "toycraft_commander.feasibility.validate_intent_feasibility",
+                side_effect=forbidden_stage,
+            ),
+            patch(
+                "toycraft_commander.feasibility.ToyCraftFeasibilityValidator.validate_intent",
+                side_effect=forbidden_stage,
+            ),
+            patch(
+                "toycraft_commander.executor.execute_toycraft_intent",
+                side_effect=forbidden_stage,
+            ),
+            patch(
+                "toycraft_commander.executor.ToyCraftExecutor.apply_effects",
+                side_effect=forbidden_stage,
+            ),
+        )
+
+        with (
+            patched_boundaries[0] as raw_payload_validator,
+            patched_boundaries[1] as feasibility_function,
+            patched_boundaries[2] as feasibility_validator,
+            patched_boundaries[3] as executor_function,
+            patched_boundaries[4] as executor,
+        ):
+            for corpus_row in KOREAN_COMMAND_TEST_CORPUS:
+                command_text = corpus_row["command_text"]
+                expected_dsl = corpus_row["expected_dsl"]
+                with self.subTest(command_text=command_text):
+                    result = interpret_command(command_text)
+
+                    self.assertFalse(result.clarification_required)
+                    self.assertIsNotNone(result.payload)
+                    payload = result.payload
+                    self.assertIsInstance(payload, INTENT_PAYLOAD_TYPES[payload.intent])
+                    self.assertEqual(expected_dsl, payload.to_dict())
+
+                    dsl_document = result.to_dsl_document()
+                    self.assertEqual(INTENT_DSL_FORMAT_VERSION, dsl_document["format"])
+                    self.assertEqual(command_text, dsl_document["command_text"])
+                    self.assertEqual(
+                        expected_dsl,
+                        dsl_document[INTENT_DSL_PAYLOAD_KEY],
+                    )
+                    self.assertEqual(
+                        {"intent", "priority", "constraints"},
+                        set(dsl_document[INTENT_DSL_PAYLOAD_KEY]).intersection(
+                            {"intent", "priority", "constraints"}
+                        ),
+                    )
+
+        for boundary in (
+            raw_payload_validator,
+            feasibility_function,
+            feasibility_validator,
+            executor_function,
+            executor,
+        ):
+            boundary.assert_not_called()
 
     def test_defined_korean_utterance_to_expected_dsl_cases_cover_variations(
         self,
