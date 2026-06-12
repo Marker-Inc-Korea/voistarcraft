@@ -35,6 +35,9 @@ Runtime adapters should target `SC2ExecutorBoundaryInterface`: call
 `skipped`, `errors`, and `audit` fields. Missing BotAI capabilities are skipped
 instead of crashing, while runtime exceptions are captured as structured errors.
 
+For the full continuation brief, original product plan, current gaps, and next
+Claude Code task sequence, see [docs/claude-handoff.md](docs/claude-handoff.md).
+
 ## Phase 0 Intent Inventory
 
 The MVP supports exactly 10 canonical intents. See [docs/intent-inventory.md](docs/intent-inventory.md) and `toycraft_commander/intents.py` for the executable inventory.
