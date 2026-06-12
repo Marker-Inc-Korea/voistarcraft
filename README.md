@@ -1,8 +1,29 @@
 # TextCraft Commander
 
-Natural-language RTS commander layer for StarCraft experiments.
+Natural-language RTS commander layer for real StarCraft control.
 
-Phase 0 focuses on ToyCraft, a text-based simulator that validates Korean command interpretation, typed Intent DSL validation, rule-based execution, and narration before any SC2 or BWAPI integration.
+The product target is StarCraft, not ToyCraft. ToyCraft remains only an offline
+test harness for parser, validator, and narration contracts. Runtime StarCraft
+control starts in `starcraft_commander`, where Korean commander intents are
+translated into semantic StarCraft II API command plans that can be applied by a
+`python-sc2`/BotAI-style runtime adapter. The project does not emulate mouse
+clicks; it turns natural language into game API commands.
+
+## StarCraft II Executor Path
+
+`starcraft_commander/sc2_executor.py` is the real-game execution boundary. It
+maps the existing typed Intent DSL into SC2 API action plans:
+
+- `TRAIN_WORKER` -> train SCVs from Command Centers
+- `BUILD_STRUCTURE` / `EXPAND` -> build Terran structures at resolved location aliases
+- `TRAIN_ARMY` -> train Terran combat units from the correct producer
+- `SCOUT`, `DEFEND`, `HARASS`, `REPAIR` -> unit-control command plans
+- `SUMMARIZE_STATE` -> observe-only state snapshot action
+
+The module is importable without StarCraft II installed so CI can verify command
+planning. Live execution requires a StarCraft II installation plus a
+`python-sc2` BotAI-like object that implements methods such as `train_unit`,
+`build_structure`, `attack_move`, and `assign_workers`.
 
 ## Phase 0 Intent Inventory
 
