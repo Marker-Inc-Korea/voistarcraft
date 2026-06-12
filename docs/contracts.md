@@ -215,6 +215,28 @@ The safety contract is simple: unsupported, impossible, or conflicting commands
 must not execute, must include a reason plus alternative, and must preserve
 `before_state == after_state`.
 
+## SC2 Command Plan Contract
+
+The real StarCraft II execution boundary lives in `starcraft_commander`. It
+reuses the same 10 canonical Intent DSL payloads, but it emits semantic SC2
+command plans rather than ToyCraft state transitions or python-sc2 method names.
+The stable public SC2 action type name set is:
+
+| Action type | Semantic contract |
+| --- | --- |
+| `assign_workers` | Assign worker units to a resource, base, or economy role. |
+| `build_structure` | Request construction of an SC2 structure at a semantic target alias. |
+| `train_unit` | Request production of one or more units from the appropriate producer. |
+| `move_group` | Move a named or resolved unit group to a semantic map target. |
+| `attack_move` | Issue combat movement toward a defensive or offensive target. |
+| `repair` | Assign repair workers to a damaged unit or structure target. |
+| `observe` | Read or summarize visible runtime state without issuing a mutating order. |
+
+These names are the public API vocabulary for command plans, logs, UI adapters,
+and fake BotAI-style tests. They must remain semantic action categories; callers
+must not depend on python-sc2 method names, ToyCraft executor action labels, or
+mouse-click automation details.
+
 ## SC2 Readiness Boundary
 
 Phase 0 readiness for SC2 is limited to the visible executor abstraction. A

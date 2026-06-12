@@ -1,6 +1,7 @@
 from pathlib import Path
 import unittest
 
+from starcraft_commander.contracts import SC2_ACTION_TYPES
 from toycraft_commander.intents import CANONICAL_INTENT_NAMES
 
 
@@ -105,6 +106,25 @@ class ArchitectureDocumentationTest(unittest.TestCase):
         for intent_name in CANONICAL_INTENT_NAMES:
             with self.subTest(intent=intent_name):
                 self.assertIn(f"`{intent_name}`", document)
+
+    def test_contract_doc_defines_public_sc2_action_type_names(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        document = (repo_root / "docs" / "contracts.md").read_text()
+
+        required_terms = (
+            "SC2 Command Plan Contract",
+            "stable public SC2 action type name set",
+            "semantic action categories",
+            "not depend on python-sc2 method names",
+            "mouse-click automation",
+        )
+        for term in required_terms:
+            with self.subTest(term=term):
+                self.assertIn(term, document)
+
+        for action_type in SC2_ACTION_TYPES:
+            with self.subTest(action_type=action_type):
+                self.assertIn(f"`{action_type}`", document)
 
 
 if __name__ == "__main__":

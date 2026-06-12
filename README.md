@@ -1,18 +1,20 @@
 # TextCraft Commander
 
-Natural-language RTS commander layer for real StarCraft control.
+Natural-language RTS commander layer for real StarCraft II control.
 
-The product target is StarCraft, not ToyCraft. ToyCraft remains only an offline
-test harness for parser, validator, and narration contracts. Runtime StarCraft
-control starts in `starcraft_commander`, where Korean commander intents are
-translated into semantic StarCraft II API command plans that can be applied by a
+Real StarCraft II execution is the product target. ToyCraft is not the product
+runtime; it remains only an offline deterministic test harness for parser,
+validator, rule-engine, and narration contracts. Runtime StarCraft II control
+starts in `starcraft_commander`, where Korean commander intents are translated
+into semantic StarCraft II API command plans that can be applied by a
 `python-sc2`/BotAI-style runtime adapter. The project does not emulate mouse
 clicks; it turns natural language into game API commands.
 
 ## StarCraft II Executor Path
 
-`starcraft_commander/sc2_executor.py` is the real-game execution boundary. It
-maps the existing typed Intent DSL into SC2 API action plans:
+`starcraft_commander/sc2_executor.py` is the real StarCraft II execution
+boundary. It maps the existing typed Intent DSL into semantic SC2 API action
+plans:
 
 - `TRAIN_WORKER` -> train SCVs from Command Centers
 - `BUILD_STRUCTURE` / `EXPAND` -> build Terran structures at resolved location aliases
@@ -20,10 +22,18 @@ maps the existing typed Intent DSL into SC2 API action plans:
 - `SCOUT`, `DEFEND`, `HARASS`, `REPAIR` -> unit-control command plans
 - `SUMMARIZE_STATE` -> observe-only state snapshot action
 
-The module is importable without StarCraft II installed so CI can verify command
-planning. Live execution requires a StarCraft II installation plus a
-`python-sc2` BotAI-like object that implements methods such as `train_unit`,
-`build_structure`, `attack_move`, and `assign_workers`.
+The public SC2 contract is expressed in stable semantic action types, not
+mouse-click automation and not ToyCraft state transitions. The module is
+importable without StarCraft II installed so CI can verify command planning.
+Live execution requires a StarCraft II installation plus a `python-sc2`
+BotAI-like runtime adapter.
+
+Runtime adapters should target `SC2ExecutorBoundaryInterface`: call
+`start(bot)` with a BotAI-like object, call `execute(plan)` with an
+`SC2ExecutionPlan`, and call `close()` at shutdown. Results are returned as
+`SC2PlanExecutionResult` values with JSON-ready `attempted`, `applied`,
+`skipped`, `errors`, and `audit` fields. Missing BotAI capabilities are skipped
+instead of crashing, while runtime exceptions are captured as structured errors.
 
 ## Phase 0 Intent Inventory
 
@@ -38,10 +48,12 @@ The component boundaries and responsibilities are documented in
 [docs/architecture.md](docs/architecture.md). The short version is that
 `pipeline.py` coordinates independent interpreter, Intent DSL, feasibility
 validator, executor/rule-engine, and narrator layers. Rejected or unclear
-commands stop before state mutation, and SC2 readiness is limited to the visible
-executor abstraction rather than any real game integration. The same document
-also traces the end-to-end command data flow from Korean input through typed DSL,
-validation, rule execution, and narrated result.
+commands stop before state mutation. Real StarCraft II integration lives behind
+the `starcraft_commander` semantic executor abstraction; ToyCraft remains the
+offline harness used to test the text, validation, and narration path without a
+StarCraft II installation. The same document also traces the end-to-end command
+data flow from Korean input through typed DSL, validation, rule execution, and
+narrated result.
 
 The typed Intent DSL, feasibility validator, rule-engine, and executor interface
 contracts are documented in [docs/contracts.md](docs/contracts.md).
@@ -97,11 +109,11 @@ parsing-stage clarification responses, and executor exceptions are adapted into
 rule-execution failures without mutating state.
 
 ToyCraft execution starts in `toycraft_commander/executor.py`, which keeps the
-Phase 0 rule-engine boundary separate from future SC2 executors. The public
+Phase 0 rule-engine boundary separate from the real SC2 executor. The public
 effect-application seam is `ToyCraftExecutorInterface`: its default
-`ToyCraftExecutor` delegates to the ToyCraft rule engine today, while a later
-SC2 adapter can implement the same `apply_effects` and `advance_time` methods
-without changing the interpreter, validator, or narrator layers. Beneath that
+`ToyCraftExecutor` delegates to the ToyCraft rule engine for deterministic
+offline tests; real StarCraft II execution is handled separately through the
+`starcraft_commander` semantic SC2 boundary. Beneath that
 adapter, `ToyCraftRuleEngineInterface` and default `ToyCraftRuleEngine` expose
 validated rule-based state transitions and deterministic time advancement.
 Implemented handlers currently include `GATHER_RESOURCE`, which applies a deterministic
@@ -131,7 +143,7 @@ structured summary data. Each payload also includes a typed
 `StateNarratorChangeSummary` grouped into resource deltas, entity deltas, and map
 deltas so commander-facing narration can explain what changed without parsing
 rule-engine strings. This keeps narrator inputs explicit without coupling Phase 0
-ToyCraft rules to a future SC2 executor.
+ToyCraft rules to the real SC2 executor.
 
 The same module also defines the State Narrator output contract. A
 `StateNarratorInterface` produces `StateNarratorResponse` values from stable
