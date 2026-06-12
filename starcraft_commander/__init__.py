@@ -82,11 +82,27 @@ _LAZY_EXPORTS: Final[dict[str, str]] = {
     "VoiceTranscriberInterface": "starcraft_commander.voice_input",
     "VoiceTranscription": "starcraft_commander.voice_input",
     "transcribe_command_audio": "starcraft_commander.voice_input",
+    # LLM interpretation (rules-first hybrid; anthropic imported lazily
+    # inside the module only when a real client must be built).
+    "HybridCommandInterpreter": "starcraft_commander.llm_interpreter",
+    "LLMCommandInterpreter": "starcraft_commander.llm_interpreter",
+    "build_hybrid_interpreter": "starcraft_commander.llm_interpreter",
+    # Commander event memory (stdlib-only ring buffer).
+    "CommanderEvent": "starcraft_commander.event_memory",
+    "CommanderEventMemory": "starcraft_commander.event_memory",
+    # Local web GUI (stdlib http.server, 127.0.0.1 only).
+    "SessionLoopBridge": "starcraft_commander.web_gui",
+    "WebGuiServer": "starcraft_commander.web_gui",
+    # Standing orders (in-game-loop code policies, never LLM-per-frame).
+    "StandingOrderController": "starcraft_commander.standing_orders",
     # Optional runtime dependency guards.
+    "MissingLLMDependencyError": "starcraft_commander.runtime_deps",
     "MissingSC2RuntimeError": "starcraft_commander.runtime_deps",
+    "is_anthropic_available": "starcraft_commander.runtime_deps",
     "is_faster_whisper_available": "starcraft_commander.runtime_deps",
     "is_python_sc2_available": "starcraft_commander.runtime_deps",
     "is_sounddevice_available": "starcraft_commander.runtime_deps",
+    "require_anthropic": "starcraft_commander.runtime_deps",
     "require_faster_whisper": "starcraft_commander.runtime_deps",
     "require_python_sc2": "starcraft_commander.runtime_deps",
     "require_sounddevice": "starcraft_commander.runtime_deps",

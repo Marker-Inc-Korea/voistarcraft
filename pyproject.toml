@@ -17,8 +17,10 @@ dependencies = []
 # StarCraft II itself plus maps must also be installed locally (see docs/sc2-smoke-test.md).
 sc2 = ["burnysc2>=6.5"]
 voice = ["faster-whisper>=1.0", "sounddevice>=0.4.6"]
+# LLM fallback interpretation for free-form Korean commands (export ANTHROPIC_API_KEY).
+llm = ["anthropic>=0.40"]
 dev = ["pytest>=7"]
 
 [tool.setuptools.packages.find]
 # Only ship the product packages; tests/ and docs/ stay out of the distribution.
-include = ["toycraft_commander*", "starcraft_commander*"]
+include = ["toycraft_commander*", "starcraft_commander*", "broodwar_commander*"]

@@ -17,10 +17,11 @@ Be clear about what is and is not proven:
   pipeline code path — Korean interpreter, Intent DSL, live SC2 feasibility
   validator, SC2 state resolver, semantic map-target resolver, python-sc2
   BotAI adapter, Korean narrator, compound-command splitting, the
-  `demo_sc2` entrypoint (dry-run, scripted, interactive, and voice modes),
-  and faster-whisper Korean voice input. `python3 -m pytest -q` currently
-  passes 636 tests (1475 subtests) without StarCraft II, python-sc2, or
-  audio hardware installed.
+  `demo_sc2` entrypoint (dry-run, scripted, interactive, voice, LLM, and GUI
+  modes), event memory, code-driven standing orders, the Brood War semantic
+  executor boundary, and faster-whisper Korean voice input. `python3 -m
+  pytest -q` currently passes 811 tests (1757 subtests) without StarCraft II,
+  python-sc2, BWAPI, Anthropic credentials, or audio hardware installed.
 - **Implemented but NOT yet smoke-tested against a real game:** live mode.
   End-to-end live play requires a local StarCraft II installation plus the
   `burnysc2` package, and that real-game smoke test has not been run in this
@@ -67,7 +68,7 @@ Intent DSL:
     ],
     "count": 1
   }
-[partially_executed] 일부만 실행되었습니다. 실행: SCV 1기 생산 명령. 보류: 지속 생산은 아직 지원되지 않아 이번 1회 생산 명령만 실행했습니다. 계속 생산하려면 같은 명령을 다시 말해 주세요.
+[executed] 명령을 실행했습니다. SCV 1기 생산 명령. 상비 명령 등록: 지속 SCV 생산.
 
 명령> 상황 보고해줘
 명령: 상황 보고해줘
@@ -80,11 +81,15 @@ Intent DSL:
     ]
   }
 [read_only] 전장 상태를 확인했습니다. 미네랄 400, 가스 0. 보급 20/21 (여유 1). 일꾼 12기 (유휴 2기). 병력: 마린 6기. 건물: 완성 사령부 1동. 발견된 적 없음.
+상비 명령: 지속 SCV 생산 활성
+최근 명령 2건:
+- #1 [executed] 명령을 실행했습니다. 마린 6기 그룹이 본진 입구로 공격 이동.
+- #2 [executed] 명령을 실행했습니다. SCV 1기 생산 명령. 상비 명령 등록: 지속 SCV 생산.
 ```
 
 Note the honesty contract in action: the compound utterance is split into
-two commands, and `SCV 계속 찍어` is narrated as `partially_executed`
-because continuous production is a one-shot order today.
+two commands, and `SCV 계속 찍어` registers a deterministic standing order
+instead of claiming an unsupported per-frame LLM behavior.
 
 Omit `--script` for an interactive `명령>` prompt.
 
@@ -97,6 +102,7 @@ integration is an optional extra (see `pyproject.toml`):
 pip install -e .              # core: interpreter, validators, planners, dry-run demo
 pip install -e '.[sc2]'       # + burnysc2 (python-sc2 fork) for live games
 pip install -e '.[voice]'     # + faster-whisper, sounddevice for Korean voice input
+pip install -e '.[llm]'       # + anthropic for optional LLM fallback interpretation
 pip install -e '.[dev]'       # + pytest
 ```
 
@@ -163,8 +169,14 @@ imports, duck-typed bot objects), so CI verifies the contracts with fakes:
   blocked work is always disclosed.
 - `live_pipeline.py` — `SC2CommandSession` composing all of the above, with
   heuristic Korean compound-command splitting (`...보내고 ...찍어`,
-  `그리고`/`하고`).
+  `그리고`/`하고`), event-memory recording, and standing-order registration.
 - `demo_sc2.py` — the runnable entrypoint described above.
+- `llm_interpreter.py` — rules-first Anthropic fallback for free-form Korean
+  utterances, schema-gated to the 10 canonical intents and called only per
+  user utterance.
+- `event_memory.py` / `standing_orders.py` / `web_gui.py` — bounded command
+  history, deterministic per-frame economy policies, and a localhost-only
+  stdlib web interface.
 - `voice_input.py` / `runtime_deps.py` — Korean speech-to-text seams and
   bilingual optional-dependency guards.
 

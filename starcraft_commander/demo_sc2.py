@@ -22,6 +22,20 @@ Two modes exist:
 ``--voice`` switches the input loop to push-to-talk microphone capture via
 ``MicrophoneListener`` + ``FasterWhisperTranscriber``; missing voice
 dependencies raise the voice guard's actionable error.
+
+``--llm`` swaps the deterministic rule interpreter for the rules-first
+hybrid interpreter (LLM fallback per user utterance, never per game frame).
+A missing ``anthropic`` SDK or API key fails fast with the actionable
+bilingual hint BEFORE any command loop starts. ``--gui [PORT]`` additionally
+serves the local web GUI: in dry-run mode the GUI bridge owns the session
+(scripted commands run through the same bridge), and in live mode the GUI
+submits into the same ``on_step`` command queue the terminal reader feeds
+while history reads the shared :class:`CommanderEventMemory`.
+
+Both dry-run and live sessions wire a :class:`CommanderEventMemory` (every
+outcome recorded with game time) and a :class:`StandingOrderController`
+(continuous SCV production / supply-block guard, ticked from ``on_step``
+every :data:`STANDING_ORDER_TICK_INTERVAL_STEPS` steps in live mode).
 """
 
 from __future__ import annotations
@@ -29,23 +43,45 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from collections.abc import Sequence
+import time
+from collections.abc import Mapping, Sequence
 from types import SimpleNamespace
 from typing import Final
 
+from starcraft_commander.event_memory import CommanderEventMemory
 from starcraft_commander.live_pipeline import SC2CommandOutcome, SC2CommandSession
+from starcraft_commander.llm_interpreter import (
+    HybridCommandInterpreter,
+    build_hybrid_interpreter,
+)
 from starcraft_commander.python_sc2_adapter import PythonSC2BotAdapter
 from starcraft_commander.runtime_deps import (
+    ANTHROPIC_INSTALL_HINT,
+    MissingLLMDependencyError,
+    require_anthropic,
     require_faster_whisper,
     require_python_sc2,
     require_sounddevice,
 )
 from starcraft_commander.sc2_executor import SC2RuntimeExecutor
+from starcraft_commander.standing_orders import (
+    STANDING_ORDER_KOREAN_LABELS,
+    StandingOrderController,
+)
+from starcraft_commander.state_resolver import (
+    DEFAULT_SC2_STATE_RESOLVER,
+    SC2StateResolverInterface,
+)
 from starcraft_commander.voice_input import (
     FasterWhisperTranscriber,
     MicrophoneListener,
     MissingVoiceDependencyError,
     VoiceTranscriberInterface,
+)
+from starcraft_commander.web_gui import (
+    DEFAULT_WEB_GUI_PORT,
+    SessionLoopBridge,
+    WebGuiServer,
 )
 
 
@@ -71,6 +107,12 @@ COMMAND_PROMPT: Final[str] = "명령> "
 
 MVP_DEMO_COMMAND: Final[str] = "마린 6기 입구로 보내고 SCV 계속 찍어"
 """The handoff Step 5 minimum demo command (compound: move + keep training)."""
+
+STANDING_ORDER_TICK_INTERVAL_STEPS: Final[int] = 8
+"""Live ``on_step`` iterations between standing-order ticks (code, not LLM)."""
+
+_BRIDGE_DEDUP_WINDOW: Final[int] = 8
+"""Recent-event window checked when deduplicating bridge re-records."""
 
 _DRY_RUN_BANNER_LINES: Final[tuple[str, ...]] = (
     "StarCraft II Commander 데모 (dry-run)",
@@ -250,13 +292,156 @@ class DemoFakeBotAI:
         return None
 
 
-def build_dry_run_session() -> tuple[SC2CommandSession, DemoFakeBotAI]:
-    """Wire the scripted fake bot through adapter, executor, and session."""
+def build_llm_interpreter() -> HybridCommandInterpreter:
+    """Build the rules-first hybrid interpreter with a REQUIRED LLM stage.
+
+    The demo's ``--llm`` flag must fail fast before any command loop instead
+    of degrading silently mid-session: a missing ``anthropic`` SDK raises the
+    bilingual :class:`MissingLLMDependencyError` from ``require_anthropic``,
+    and an importable SDK without a resolvable API key raises the same error
+    with the same actionable hint (it covers ``ANTHROPIC_API_KEY`` too).
+    """
+
+    require_anthropic()
+    hybrid = build_hybrid_interpreter()
+    if hybrid.llm_interpreter is None:
+        raise MissingLLMDependencyError(ANTHROPIC_INSTALL_HINT)
+    return hybrid
+
+
+def build_dry_run_session(
+    interpreter: object | None = None,
+) -> tuple[SC2CommandSession, DemoFakeBotAI]:
+    """Wire the scripted fake bot through adapter, executor, and session.
+
+    The session carries a fresh :class:`CommanderEventMemory` (every outcome
+    recorded with game time, readable via ``session.event_memory``) and a
+    fresh :class:`StandingOrderController` (``session.standing_orders``).
+    ``interpreter=None`` keeps the session's default rule interpreter.
+    """
 
     bot = DemoFakeBotAI()
     adapter = PythonSC2BotAdapter(bot=bot)
-    session = SC2CommandSession(executor=SC2RuntimeExecutor(bot=adapter))
+    session_kwargs: dict[str, object] = {
+        "executor": SC2RuntimeExecutor(bot=adapter),
+        "event_memory": CommanderEventMemory(),
+        "standing_orders": StandingOrderController(),
+    }
+    if interpreter is not None:
+        session_kwargs["interpreter"] = interpreter
+    session = SC2CommandSession(**session_kwargs)
     return session, bot
+
+
+class _SessionRecordedHistory:
+    """``SessionLoopBridge`` history seam over a session-recorded memory.
+
+    In ``--gui`` dry-run mode the session itself records every outcome into
+    the shared :class:`CommanderEventMemory` (stamped with game time), and
+    the bridge then offers the same outcomes to ``record`` again. Storing
+    them twice would double every GUI log line, so ``record`` skips any
+    outcome whose command text, status, and narration already match a recent
+    memory event. Outcomes the session never recorded — the bridge-built
+    session-failure reports — find no match and are still stored, so nothing
+    is dropped silently.
+    """
+
+    def __init__(self, memory: CommanderEventMemory) -> None:
+        self._memory = memory
+
+    def record(self, outcome: object) -> object:
+        """Record one outcome unless the session already recorded it."""
+
+        fingerprint = _outcome_fingerprint(outcome)
+        for event in self._memory.recent(_BRIDGE_DEDUP_WINDOW):
+            if (event.command_text, event.status, event.narration) == fingerprint:
+                return event
+        return self._memory.record(outcome)
+
+    def since(self, seq: int) -> tuple[object, ...]:
+        """Return every memory event recorded after sequence ``seq``."""
+
+        return self._memory.since(int(seq))
+
+    def latest_seq(self) -> int:
+        """Return the memory's highest assigned sequence number."""
+
+        return self._memory.latest_seq()
+
+
+def _outcome_fingerprint(outcome: object) -> tuple[str, str, str]:
+    """Build the (command_text, status, narration) dedup key for one outcome."""
+
+    if isinstance(outcome, Mapping):
+        return (
+            str(outcome.get("command_text", "")),
+            str(outcome.get("status", "")),
+            str(outcome.get("narration", "")),
+        )
+    return (
+        str(getattr(outcome, "command_text", "")),
+        str(getattr(outcome, "status", "")),
+        str(getattr(outcome, "narration", "")),
+    )
+
+
+class CommanderGameBridge:
+    """Live-mode web GUI bridge over the bot's ``on_step`` command queue.
+
+    ``submit_command`` enqueues into the SAME asyncio queue the terminal
+    reader feeds (thread-safe via ``loop.call_soon_threadsafe``), so browser
+    and terminal commands drain through one sequential ``on_step`` path and
+    the LLM-free per-frame invariant holds. History is read directly from
+    the shared :class:`CommanderEventMemory` the live session records into;
+    the bridge itself never executes or records anything.
+    """
+
+    def __init__(
+        self,
+        bot: object,
+        loop: asyncio.AbstractEventLoop,
+        command_queue: "asyncio.Queue[str]",
+        event_memory: CommanderEventMemory,
+        state_resolver: SC2StateResolverInterface = DEFAULT_SC2_STATE_RESOLVER,
+    ) -> None:
+        self._bot = bot
+        self._loop = loop
+        self._queue = command_queue
+        self._event_memory = event_memory
+        self._state_resolver = state_resolver
+
+    def submit_command(self, text: str) -> None:
+        """Enqueue one browser utterance into the on_step command queue."""
+
+        if not isinstance(text, str):
+            raise TypeError("Web GUI command text must be a string.")
+        cleaned = text.strip()
+        if not cleaned:
+            raise ValueError("Web GUI command text must be non-empty.")
+        self._loop.call_soon_threadsafe(self._queue.put_nowait, cleaned)
+
+    def state_snapshot(self) -> Mapping[str, object] | None:
+        """Resolve the live bot into a JSON-ready commander state snapshot."""
+
+        state = self._state_resolver.resolve(self._bot)
+        to_dict = getattr(state, "to_dict", None)
+        if callable(to_dict):
+            return dict(to_dict())
+        if isinstance(state, Mapping):
+            return dict(state)
+        return None
+
+    def history_since(self, seq: int) -> tuple[dict[str, object], ...]:
+        """Return JSON-ready shared-memory events after sequence ``seq``."""
+
+        return tuple(
+            event.to_dict() for event in self._event_memory.since(int(seq))
+        )
+
+    def latest_seq(self) -> int:
+        """Return the shared memory's highest assigned sequence number."""
+
+        return int(self._event_memory.latest_seq())
 
 
 def render_outcome_lines(outcome: SC2CommandOutcome) -> tuple[str, ...]:
@@ -331,6 +516,27 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--voice",
         action="store_true",
         help="push-to-talk voice input (requires faster-whisper + sounddevice)",
+    )
+    parser.add_argument(
+        "--llm",
+        action="store_true",
+        help=(
+            "rules-first hybrid interpretation with an Anthropic LLM fallback "
+            "per utterance (requires the anthropic package + ANTHROPIC_API_KEY; "
+            "fails fast when unavailable)"
+        ),
+    )
+    parser.add_argument(
+        "--gui",
+        nargs="?",
+        type=int,
+        const=DEFAULT_WEB_GUI_PORT,
+        default=None,
+        metavar="PORT",
+        help=(
+            "serve the local web GUI on 127.0.0.1 "
+            f"(default port: {DEFAULT_WEB_GUI_PORT}; 0 for an ephemeral port)"
+        ),
     )
     parser.add_argument(
         "--record-seconds",
@@ -445,16 +651,74 @@ async def _run_interactive(session: SC2CommandSession, args: argparse.Namespace)
         await _process_and_print(session, command_text)
 
 
-def run_dry_run(args: argparse.Namespace) -> None:
+def _serve_until_interrupt() -> None:
+    """Block the main thread until KeyboardInterrupt (Ctrl+C)."""
+
+    while True:
+        time.sleep(0.5)
+
+
+def _run_dry_run_gui(session: SC2CommandSession, args: argparse.Namespace) -> int:
+    """Serve the dry-run session through the web GUI until interrupted.
+
+    The GUI bridge owns the session: scripted ``--script`` commands are
+    submitted through the same bridge first, then the server keeps serving
+    browser commands until Ctrl+C. History is the session's own
+    :class:`CommanderEventMemory` (the bridge never records a session
+    outcome twice).
+    """
+
+    memory = session.event_memory
+    history = (
+        _SessionRecordedHistory(memory)
+        if isinstance(memory, CommanderEventMemory)
+        else None
+    )
+    bridge = SessionLoopBridge(session=session, history=history)
+    server = WebGuiServer(bridge=bridge, port=args.gui)
+    bridge.start()
+    try:
+        try:
+            server.start()
+        except OSError as error:
+            print(
+                f"포트 {args.gui}에 바인딩하지 못했습니다 (이유: {error}). "
+                "--gui에 다른 포트를 지정하거나 --gui 0으로 임시 포트를 사용해 주세요."
+            )
+            return 1
+        print(f"VoiStarCraft 커맨더 웹 GUI 시작: {server.url}")
+        if args.script:
+            for command_text in args.script:
+                print(f"{COMMAND_PROMPT}{command_text}")
+                bridge.submit_command(command_text)
+        print(
+            "브라우저에서 위 주소를 열고 한국어 명령을 입력하세요. "
+            f"예: {MVP_DEMO_COMMAND} (종료: Ctrl+C)"
+        )
+        _serve_until_interrupt()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.stop()
+        bridge.stop()
+    print("웹 GUI를 종료합니다.")
+    return 0
+
+
+def run_dry_run(args: argparse.Namespace) -> int:
     """Run the full pipeline against the built-in scripted fake bot."""
 
-    session, _bot = build_dry_run_session()
+    interpreter = build_llm_interpreter() if args.llm else None
+    session, _bot = build_dry_run_session(interpreter=interpreter)
     for line in _DRY_RUN_BANNER_LINES:
         print(line)
+    if args.gui is not None:
+        return _run_dry_run_gui(session, args)
     if args.script:
         asyncio.run(_run_script(session, tuple(args.script)))
     else:
         asyncio.run(_run_interactive(session, args))
+    return 0
 
 
 def run_live(args: argparse.Namespace) -> None:
@@ -463,12 +727,16 @@ def run_live(args: argparse.Namespace) -> None:
     Raises:
         MissingSC2RuntimeError: When the optional python-sc2 runtime is not
             installed (actionable bilingual install guidance included).
+        MissingLLMDependencyError: When ``--llm`` is requested without the
+            anthropic SDK or a resolvable API key (fail fast, before the
+            game starts).
     """
 
     require_python_sc2()
+    # Fail fast with the actionable bilingual hints instead of letting a
+    # missing optional dependency surface mid-game inside the loop.
+    interpreter = build_llm_interpreter() if args.llm else None
     if args.voice:
-        # Fail fast with the actionable bilingual hints instead of letting a
-        # missing voice dependency surface mid-game inside the reader task.
         require_faster_whisper()
         require_sounddevice()
     # Lazy imports: this module must stay importable without python-sc2.
@@ -480,22 +748,64 @@ def run_live(args: argparse.Namespace) -> None:
 
     use_voice = bool(args.voice)
     record_seconds = float(args.record_seconds)
+    gui_port = args.gui
 
     class CommanderLiveBot(BotAI):
-        """Live BotAI draining queued commander texts inside ``on_step``."""
+        """Live BotAI draining queued commander texts inside ``on_step``.
+
+        Standing orders tick every
+        :data:`STANDING_ORDER_TICK_INTERVAL_STEPS` ``on_step`` iterations —
+        deterministic code policies, never the LLM. Every command outcome is
+        recorded into the shared :class:`CommanderEventMemory`, which the
+        optional ``--gui`` server reads for its history endpoint.
+        """
 
         def __init__(self) -> None:
             super().__init__()
             self.session: SC2CommandSession | None = None
             self.command_queue: "asyncio.Queue[str]" = asyncio.Queue()
+            self.event_memory = CommanderEventMemory()
+            self.standing_orders = StandingOrderController()
+            self.gui_server: WebGuiServer | None = None
             self._reader_task: object | None = None
 
         async def on_start(self) -> None:
             adapter = PythonSC2BotAdapter(bot=self)
-            self.session = SC2CommandSession(executor=SC2RuntimeExecutor(bot=adapter))
+            session_kwargs: dict[str, object] = {
+                "executor": SC2RuntimeExecutor(bot=adapter),
+                "event_memory": self.event_memory,
+                "standing_orders": self.standing_orders,
+            }
+            if interpreter is not None:
+                session_kwargs["interpreter"] = interpreter
+            self.session = SC2CommandSession(**session_kwargs)
             loop = asyncio.get_running_loop()
             self._reader_task = loop.create_task(self._feed_commands(loop))
+            if gui_port is not None:
+                self._start_gui_server(loop)
             print("말하면 스타가 움직인다. 한국어 명령을 입력하세요 (종료: 종료/quit).")
+
+        def _start_gui_server(self, loop: asyncio.AbstractEventLoop) -> None:
+            """Serve the web GUI over the live command queue and memory."""
+
+            bridge = CommanderGameBridge(
+                bot=self,
+                loop=loop,
+                command_queue=self.command_queue,
+                event_memory=self.event_memory,
+            )
+            server = WebGuiServer(bridge=bridge, port=gui_port)
+            try:
+                server.start()
+            except OSError as error:
+                print(
+                    f"웹 GUI 포트 {gui_port}에 바인딩하지 못했습니다 (이유: {error}). "
+                    "게임은 GUI 없이 계속 진행됩니다. 다음에는 --gui에 다른 포트를 "
+                    "지정해 주세요."
+                )
+                return
+            self.gui_server = server
+            print(f"VoiStarCraft 커맨더 웹 GUI 시작: {server.url}")
 
         async def _feed_commands(self, loop: asyncio.AbstractEventLoop) -> None:
             # The whole loop is guarded: an unexpected reader exception must
@@ -528,6 +838,11 @@ def run_live(args: argparse.Namespace) -> None:
             while not self.command_queue.empty():
                 command_text = self.command_queue.get_nowait()
                 await _process_and_print(self.session, command_text)
+            if iteration % STANDING_ORDER_TICK_INTERVAL_STEPS == 0:
+                for tick in await self.standing_orders.tick(self):
+                    label = STANDING_ORDER_KOREAN_LABELS.get(tick.kind, tick.kind)
+                    for action in tick.actions_issued:
+                        print(f"[상비 명령] {label}: {action}")
 
     race_by_name = {"terran": Race.Terran}
     difficulty_by_name = {
@@ -550,9 +865,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     args = parse_args(argv)
     if args.dry_run:
-        run_dry_run(args)
-    else:
-        run_live(args)
+        return run_dry_run(args)
+    run_live(args)
     return 0
 
 

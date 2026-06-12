@@ -16,17 +16,22 @@ import unittest
 from unittest import mock
 
 from starcraft_commander.runtime_deps import (
+    ANTHROPIC_INSTALL_HINT,
+    ANTHROPIC_MODULE_NAME,
     FASTER_WHISPER_INSTALL_HINT,
     FASTER_WHISPER_MODULE_NAME,
+    MissingLLMDependencyError,
     MissingSC2RuntimeError,
     MissingVoiceDependencyError,
     PYTHON_SC2_INSTALL_HINT,
     PYTHON_SC2_MODULE_NAME,
     SOUNDDEVICE_INSTALL_HINT,
     SOUNDDEVICE_MODULE_NAME,
+    is_anthropic_available,
     is_faster_whisper_available,
     is_python_sc2_available,
     is_sounddevice_available,
+    require_anthropic,
     require_faster_whisper,
     require_python_sc2,
     require_sounddevice,
@@ -51,6 +56,12 @@ GUARD_CASES = (
         require_sounddevice,
         MissingVoiceDependencyError,
     ),
+    (
+        ANTHROPIC_MODULE_NAME,
+        is_anthropic_available,
+        require_anthropic,
+        MissingLLMDependencyError,
+    ),
 )
 
 
@@ -62,7 +73,12 @@ def _block_module(module_name):
 
 class RuntimeDepsErrorHierarchyTest(unittest.TestCase):
     def test_guard_errors_subclass_runtime_error(self) -> None:
-        for error_type in (MissingSC2RuntimeError, MissingVoiceDependencyError):
+        guard_error_types = (
+            MissingSC2RuntimeError,
+            MissingVoiceDependencyError,
+            MissingLLMDependencyError,
+        )
+        for error_type in guard_error_types:
             with self.subTest(error_type=error_type.__name__):
                 self.assertTrue(issubclass(error_type, RuntimeError))
 
@@ -159,6 +175,22 @@ class RuntimeDepsUnavailableTest(unittest.TestCase):
                 self.assertIn(pip_name, message)
                 self.assertIn("설치", message)
                 self.assertEqual(message, expected_hint)
+
+    def test_missing_llm_dependency_error_message_is_actionable(self) -> None:
+        with _block_module(ANTHROPIC_MODULE_NAME):
+            with self.assertRaises(MissingLLMDependencyError) as context:
+                require_anthropic()
+        message = str(context.exception)
+        expected_fragments = (
+            "pip install 'voistarcraft[llm]'",
+            "pip install anthropic",
+            "ANTHROPIC_API_KEY",
+            "설치",
+        )
+        for fragment in expected_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, message)
+        self.assertEqual(message, ANTHROPIC_INSTALL_HINT)
 
 
 class RuntimeDepsFakeInjectionTest(unittest.TestCase):

@@ -2,9 +2,10 @@
 
 The commander packages must stay importable without StarCraft II, python-sc2
 (the maintained ``burnysc2`` fork providing the ``sc2`` package),
-faster-whisper, or sounddevice installed. Code that needs one of those
-optional runtimes calls the ``require_*`` guards below, which lazily import
-the dependency and raise an actionable bilingual error when it is absent.
+faster-whisper, sounddevice, or anthropic installed. Code that needs one of
+those optional runtimes calls the ``require_*`` guards below, which lazily
+import the dependency and raise an actionable bilingual error when it is
+absent.
 
 This module is pure stdlib and safe to import everywhere.
 """
@@ -16,17 +17,22 @@ from types import ModuleType
 from typing import Final
 
 __all__ = [
+    "ANTHROPIC_INSTALL_HINT",
+    "ANTHROPIC_MODULE_NAME",
     "FASTER_WHISPER_INSTALL_HINT",
     "FASTER_WHISPER_MODULE_NAME",
+    "MissingLLMDependencyError",
     "MissingSC2RuntimeError",
     "MissingVoiceDependencyError",
     "PYTHON_SC2_INSTALL_HINT",
     "PYTHON_SC2_MODULE_NAME",
     "SOUNDDEVICE_INSTALL_HINT",
     "SOUNDDEVICE_MODULE_NAME",
+    "is_anthropic_available",
     "is_faster_whisper_available",
     "is_python_sc2_available",
     "is_sounddevice_available",
+    "require_anthropic",
     "require_faster_whisper",
     "require_python_sc2",
     "require_sounddevice",
@@ -40,6 +46,9 @@ FASTER_WHISPER_MODULE_NAME: Final[str] = "faster_whisper"
 
 SOUNDDEVICE_MODULE_NAME: Final[str] = "sounddevice"
 """Importable module name provided by the sounddevice distribution."""
+
+ANTHROPIC_MODULE_NAME: Final[str] = "anthropic"
+"""Importable module name provided by the anthropic SDK distribution."""
 
 PYTHON_SC2_INSTALL_HINT: Final[str] = (
     "The python-sc2 runtime (importable package 'sc2') is not installed. "
@@ -77,6 +86,17 @@ SOUNDDEVICE_INSTALL_HINT: Final[str] = _build_voice_install_hint(
 )
 """Actionable bilingual guidance shown when sounddevice is absent."""
 
+ANTHROPIC_INSTALL_HINT: Final[str] = (
+    "The optional LLM dependency 'anthropic' is not installed. "
+    "Install LLM command interpretation with: pip install 'voistarcraft[llm]' "
+    "(or: pip install anthropic), then export ANTHROPIC_API_KEY with a valid "
+    "Anthropic API key. "
+    "자유 발화 한국어 명령 해석(LLM)에 필요한 'anthropic' 패키지가 "
+    "설치되어 있지 않습니다. pip install 'voistarcraft[llm]' 명령으로 설치한 뒤 "
+    "ANTHROPIC_API_KEY 환경 변수에 유효한 Anthropic API 키를 설정하세요."
+)
+"""Actionable bilingual guidance shown when the anthropic SDK is absent."""
+
 
 class MissingSC2RuntimeError(RuntimeError):
     """Raised when the optional python-sc2 (burnysc2) runtime is absent."""
@@ -84,6 +104,10 @@ class MissingSC2RuntimeError(RuntimeError):
 
 class MissingVoiceDependencyError(RuntimeError):
     """Raised when an optional voice-input dependency is absent."""
+
+
+class MissingLLMDependencyError(RuntimeError):
+    """Raised when the optional anthropic LLM dependency is absent."""
 
 
 def _import_optional_module(module_name: str) -> "ModuleType | None":
@@ -150,3 +174,22 @@ def require_sounddevice() -> ModuleType:
         return importlib.import_module(SOUNDDEVICE_MODULE_NAME)
     except ImportError as error:
         raise MissingVoiceDependencyError(SOUNDDEVICE_INSTALL_HINT) from error
+
+
+def is_anthropic_available() -> bool:
+    """Return whether the anthropic LLM SDK package is importable."""
+
+    return _import_optional_module(ANTHROPIC_MODULE_NAME) is not None
+
+
+def require_anthropic() -> ModuleType:
+    """Return the lazily imported ``anthropic`` package or raise.
+
+    Raises:
+        MissingLLMDependencyError: When the anthropic SDK is not installed.
+    """
+
+    try:
+        return importlib.import_module(ANTHROPIC_MODULE_NAME)
+    except ImportError as error:
+        raise MissingLLMDependencyError(ANTHROPIC_INSTALL_HINT) from error

@@ -18,6 +18,7 @@ target listing, and skipped runtime work is never narrated as success.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -34,12 +35,20 @@ from starcraft_commander.feasibility import (
     SC2FeasibilityResult,
     SC2FeasibilityValidatorInterface,
 )
-from starcraft_commander.narrator import DEFAULT_SC2_NARRATOR, SC2NarratorInterface
+from starcraft_commander.narrator import (
+    DEFAULT_SC2_NARRATOR,
+    SC2KoreanNarrator,
+    SC2NarratorInterface,
+)
 from starcraft_commander.sc2_executor import (
     DEFAULT_SC2_ACTION_PLANNER,
     SC2ActionPlannerInterface,
     SC2ExecutorBoundaryInterface,
     SC2RuntimeExecutor,
+)
+from starcraft_commander.standing_orders import (
+    CONSTRAINT_TO_STANDING_ORDER,
+    STANDING_ORDER_KOREAN_LABELS,
 )
 from starcraft_commander.state_resolver import (
     DEFAULT_SC2_STATE_RESOLVER,
@@ -89,6 +98,17 @@ _EXPLICIT_CONNECTIVE_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(?:^|\s)그리고\s|\s하고\s"
 )
 """Detector for explicit standalone connectives signaling a compound order."""
+
+SC2_STANDING_ORDER_REGISTRATION_PREFIX: Final[str] = "상비 명령 등록"
+"""Korean prefix of the narration suffix announcing new standing orders."""
+
+_SUMMARIZE_STATE_INTENT_NAME: Final[str] = "SUMMARIZE_STATE"
+"""Intent whose read-only outcomes get standing-order/memory enrichment."""
+
+_EXECUTED_OUTCOME_STATUSES: Final[frozenset[str]] = frozenset(
+    {"executed", "partially_executed", "read_only"}
+)
+"""Outcome statuses that count as a successful execution for registration."""
 
 
 def split_compound_command(text: str) -> tuple[str, ...]:
@@ -209,6 +229,23 @@ class SC2CommandSession:
     resolver, and the Korean narrator. Bind a runtime by constructing the
     session with ``executor=SC2RuntimeExecutor(bot=adapter)`` where ``adapter``
     is typically a ``PythonSC2BotAdapter`` wrapping the live BotAI object.
+
+    Two optional, duck-typed integrations:
+
+    - ``event_memory`` (``record(outcome, game_time_seconds=None)``, for
+      example :class:`~starcraft_commander.event_memory.CommanderEventMemory`)
+      records every produced outcome — including blocked and clarification
+      ones — stamped with the resolved state's game time when available.
+    - ``standing_orders`` (``register_from_payload(payload)`` +
+      ``korean_status()``, for example
+      :class:`~starcraft_commander.standing_orders.StandingOrderController`)
+      is registered from each successfully executed payload's constraints.
+      Newly registered orders are announced with an honest Korean narration
+      suffix, and because the controller genuinely enforces the
+      continuous-production constraint, a default ``SC2KoreanNarrator`` is
+      upgraded to treat those constraints as enforced (full execution)
+      instead of disclosing them as dropped. Sessions WITHOUT a controller
+      keep today's honest ``지속 생산 미지원`` disclosure.
     """
 
     interpreter: CommandInterpreterInterface = DEFAULT_COMMAND_INTERPRETER
@@ -217,6 +254,8 @@ class SC2CommandSession:
     executor: SC2ExecutorBoundaryInterface = field(default_factory=SC2RuntimeExecutor)
     state_resolver: SC2StateResolverInterface = DEFAULT_SC2_STATE_RESOLVER
     narrator: SC2NarratorInterface = DEFAULT_SC2_NARRATOR
+    event_memory: object | None = None
+    standing_orders: object | None = None
 
     def __post_init__(self) -> None:
         seams = (
@@ -233,6 +272,30 @@ class SC2CommandSession:
                 raise TypeError(
                     f"SC2 command session {field_name} must implement {method_name}()."
                 )
+        if self.event_memory is not None and not callable(
+            getattr(self.event_memory, "record", None)
+        ):
+            raise TypeError("SC2 command session event_memory must implement record().")
+        if self.standing_orders is not None:
+            for method_name in ("register_from_payload", "korean_status"):
+                if not callable(getattr(self.standing_orders, method_name, None)):
+                    raise TypeError(
+                        "SC2 command session standing_orders must implement "
+                        f"{method_name}()."
+                    )
+            # The controller genuinely enforces the standing-order constraints,
+            # so a default Korean narrator must stop disclosing them as
+            # dropped. Custom narrator implementations are left untouched.
+            if isinstance(self.narrator, SC2KoreanNarrator):
+                enforced = self.narrator.enforced_constraints | frozenset(
+                    CONSTRAINT_TO_STANDING_ORDER
+                )
+                if enforced != self.narrator.enforced_constraints:
+                    object.__setattr__(
+                        self,
+                        "narrator",
+                        SC2KoreanNarrator(enforced_constraints=enforced),
+                    )
 
     async def process_text(self, command_text: str) -> tuple[SC2CommandOutcome, ...]:
         """Process one commander utterance into one outcome per command part.
@@ -283,12 +346,12 @@ class SC2CommandSession:
                     if getattr(part_result, "payload", None) is not None:
                         outcomes.append(await self._process_interpretation(part_result))
                     else:
-                        outcomes.append(_clarification_outcome(part_result))
+                        outcomes.append(self._finalize_clarification(part_result))
                 return tuple(outcomes)
 
         if full_resolved:
             return (await self._process_interpretation(interpretation),)
-        return (_clarification_outcome(interpretation),)
+        return (self._finalize_clarification(interpretation),)
 
     async def _process_interpretation(
         self,
@@ -304,12 +367,15 @@ class SC2CommandSession:
         feasibility = self.validator.validate_payload(payload, state)
         if not feasibility.executable:
             rejection = self.narrator.narrate_rejection(feasibility)
-            return SC2CommandOutcome(
-                command_text=command_text,
-                status="blocked",
-                narration=rejection.response_text,
-                intent_dsl=intent_dsl,
-                feasibility=feasibility,
+            return self._finalize_outcome(
+                SC2CommandOutcome(
+                    command_text=command_text,
+                    status="blocked",
+                    narration=rejection.response_text,
+                    intent_dsl=intent_dsl,
+                    feasibility=feasibility,
+                ),
+                state,
             )
 
         try:
@@ -318,25 +384,96 @@ class SC2CommandSession:
             # The strict planner message already lists every supported target;
             # the narrator appends the standard Korean actionable alternative.
             rejection = self.narrator.narrate_rejection(str(error))
-            return SC2CommandOutcome(
-                command_text=command_text,
-                status="blocked",
-                narration=rejection.response_text,
-                intent_dsl=intent_dsl,
-                feasibility=feasibility,
+            return self._finalize_outcome(
+                SC2CommandOutcome(
+                    command_text=command_text,
+                    status="blocked",
+                    narration=rejection.response_text,
+                    intent_dsl=intent_dsl,
+                    feasibility=feasibility,
+                ),
+                state,
             )
 
         execution_result = await self.executor.execute(plan)
         narration = self.narrator.narrate_plan_result(execution_result)
-        return SC2CommandOutcome(
-            command_text=command_text,
-            status=narration.status,
-            narration=narration.response_text,
-            intent_dsl=intent_dsl,
-            plan=plan,
-            execution_result=execution_result,
-            feasibility=feasibility,
+        narration_text = narration.response_text
+        if (
+            self.standing_orders is not None
+            and narration.status in _EXECUTED_OUTCOME_STATUSES
+        ):
+            newly_registered = tuple(
+                self.standing_orders.register_from_payload(payload)
+            )
+            if newly_registered:
+                narration_text += _standing_order_registration_suffix(
+                    newly_registered
+                )
+        if narration.status == "read_only" and (
+            plan.intent_name == _SUMMARIZE_STATE_INTENT_NAME
+        ):
+            narration_text = self._enriched_state_narration(narration_text)
+        return self._finalize_outcome(
+            SC2CommandOutcome(
+                command_text=command_text,
+                status=narration.status,
+                narration=narration_text,
+                intent_dsl=intent_dsl,
+                plan=plan,
+                execution_result=execution_result,
+                feasibility=feasibility,
+            ),
+            state,
         )
+
+    def _finalize_clarification(self, interpretation: object) -> SC2CommandOutcome:
+        """Build and record one clarification outcome (no resolved state)."""
+
+        return self._finalize_outcome(_clarification_outcome(interpretation), None)
+
+    def _finalize_outcome(
+        self,
+        outcome: SC2CommandOutcome,
+        state: SC2CommanderState | None,
+    ) -> SC2CommandOutcome:
+        """Record one outcome into the optional event memory and return it.
+
+        The game time stamp comes from the resolved commander state when one
+        was available for this command; clarification outcomes (no state was
+        ever resolved) are recorded without a game time.
+        """
+
+        if self.event_memory is not None:
+            self.event_memory.record(
+                outcome,
+                game_time_seconds=_state_game_time_seconds(state),
+            )
+        return outcome
+
+    def _enriched_state_narration(self, narration_text: str) -> str:
+        """Append standing-order status and recent-command lines, if present.
+
+        ``SUMMARIZE_STATE`` is the commander's situation report: when the
+        session carries a standing-order controller and/or an event memory
+        with a ``korean_summary`` renderer, the report honestly includes the
+        currently active standing orders and the most recent command log.
+        """
+
+        sections = [narration_text]
+        if self.standing_orders is not None:
+            status_line = str(self.standing_orders.korean_status()).strip()
+            if status_line:
+                sections.append(status_line)
+        summary_renderer = (
+            getattr(self.event_memory, "korean_summary", None)
+            if self.event_memory is not None
+            else None
+        )
+        if callable(summary_renderer):
+            summary_text = str(summary_renderer()).strip()
+            if summary_text:
+                sections.append(summary_text)
+        return "\n".join(sections)
 
     def _resolve_state(self) -> SC2CommanderState | None:
         """Resolve live commander state from the executor's bound runtime.
@@ -376,6 +513,29 @@ def _payload_document(payload: object) -> dict[str, object] | None:
     if isinstance(payload, Mapping):
         return dict(payload)
     return None
+
+
+def _standing_order_registration_suffix(kinds: tuple[str, ...]) -> str:
+    """Render the Korean narration suffix for newly registered standing orders."""
+
+    labels = ", ".join(
+        STANDING_ORDER_KOREAN_LABELS.get(kind, kind) for kind in kinds
+    )
+    return f" {SC2_STANDING_ORDER_REGISTRATION_PREFIX}: {labels}."
+
+
+def _state_game_time_seconds(state: SC2CommanderState | None) -> float | None:
+    """Read a recordable game time from one resolved state, defensively."""
+
+    if state is None:
+        return None
+    value = getattr(state, "game_time_seconds", None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    seconds = float(value)
+    if not math.isfinite(seconds) or seconds < 0.0:
+        return None
+    return seconds
 
 
 def _clarification_outcome(interpretation: object) -> SC2CommandOutcome:

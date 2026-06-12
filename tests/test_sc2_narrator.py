@@ -428,17 +428,77 @@ class SC2KoreanNarratorHonestyTest(unittest.TestCase):
         self.assertIn("요청한 유닛 그룹에 해당하는 아군 유닛이 없습니다", response.response_text)
 
     def test_unenforced_constraint_downgrades_success_with_disclosure(self) -> None:
+        # Without standing-order support (the DEFAULT narrator) the
+        # continuous-production constraint is honestly disclosed as dropped.
         plan = SC2ExecutionPlan(
             intent_name="TRAIN_WORKER",
             constraints=("keep SCV production continuous",),
             ordered_actions=(_action(SC2ActionType.TRAIN_UNIT, "SCV", count=1),),
         )
         result = full_success_result(plan)
-        response = self.narrator.narrate_plan_result(result)
+        for label, narrator in (
+            ("fresh default", self.narrator),
+            ("module default", DEFAULT_SC2_NARRATOR),
+            ("explicit empty set", SC2KoreanNarrator(enforced_constraints=frozenset())),
+        ):
+            with self.subTest(narrator=label):
+                response = narrator.narrate_plan_result(result)
+                self.assertEqual(response.status, "partially_executed")
+                self.assertIn("SCV 1기 생산 명령", response.response_text)
+                self.assertIn("지속 생산은 아직 지원되지 않아", response.response_text)
+
+    def test_enforced_constraint_narrates_full_execution(self) -> None:
+        # Once a standing-order controller genuinely enforces continuous
+        # production, the disclosure would itself be dishonest: the
+        # enforced-constraints narrator narrates plain full execution.
+        plan = SC2ExecutionPlan(
+            intent_name="TRAIN_WORKER",
+            constraints=("keep SCV production continuous",),
+            ordered_actions=(_action(SC2ActionType.TRAIN_UNIT, "SCV", count=1),),
+        )
+        narrator = SC2KoreanNarrator(
+            enforced_constraints=frozenset({"keep SCV production continuous"})
+        )
+        response = narrator.narrate_plan_result(full_success_result(plan))
+
+        self.assertEqual(response.status, "executed")
+        self.assertIn("명령을 실행했습니다", response.response_text)
+        self.assertIn("SCV 1기 생산 명령", response.response_text)
+        self.assertNotIn("지속 생산은 아직 지원되지 않아", response.response_text)
+
+    def test_enforced_constraints_only_cover_listed_constraints(self) -> None:
+        # An unrelated enforced constraint must not suppress the disclosure.
+        plan = SC2ExecutionPlan(
+            intent_name="TRAIN_WORKER",
+            constraints=("keep SCV production continuous",),
+            ordered_actions=(_action(SC2ActionType.TRAIN_UNIT, "SCV", count=1),),
+        )
+        narrator = SC2KoreanNarrator(
+            enforced_constraints=frozenset({"prevent supply block"})
+        )
+        response = narrator.narrate_plan_result(full_success_result(plan))
 
         self.assertEqual(response.status, "partially_executed")
-        self.assertIn("SCV 1기 생산 명령", response.response_text)
         self.assertIn("지속 생산은 아직 지원되지 않아", response.response_text)
+
+    def test_default_narrator_enforces_no_constraints(self) -> None:
+        self.assertEqual(frozenset(), DEFAULT_SC2_NARRATOR.enforced_constraints)
+        self.assertEqual(frozenset(), SC2KoreanNarrator().enforced_constraints)
+
+    def test_enforced_constraints_rejects_single_string(self) -> None:
+        # A bare string would be iterated character by character — reject it
+        # loudly instead of silently enforcing nothing.
+        with self.assertRaises(TypeError):
+            SC2KoreanNarrator(enforced_constraints="keep SCV production continuous")
+
+    def test_enforced_constraints_coerced_to_frozenset_of_strings(self) -> None:
+        narrator = SC2KoreanNarrator(
+            enforced_constraints=["keep SCV production continuous"]
+        )
+        self.assertEqual(
+            frozenset({"keep SCV production continuous"}),
+            narrator.enforced_constraints,
+        )
 
     def test_plain_constraints_do_not_downgrade_success(self) -> None:
         plan = SC2ExecutionPlan(

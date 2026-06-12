@@ -60,9 +60,8 @@ a6e5d32 feat: add real StarCraft II executor boundary
 107d3c9 feat: add ToyCraft commander MVP
 ```
 
-The working tree additionally contains the (uncommitted) live SC2 integration
-described below: `pyproject.toml`, `docs/sc2-smoke-test.md`, eight new
-`starcraft_commander` modules, and their test files.
+The working tree additionally contains the (uncommitted) LLM/GUI/event-memory,
+standing-order, and Brood War boundary integration described below.
 
 Validation status:
 
@@ -73,7 +72,7 @@ python3 -m pytest -q
 Expected current result:
 
 ```text
-636 passed, 1475 subtests passed
+811 passed, 1757 subtests passed
 ```
 
 ## Implemented Components
@@ -274,11 +273,41 @@ python3 -m starcraft_commander.demo_sc2 --dry-run --script "마린 6기 입구�
 
 This splits into two parts via `split_compound_command`: the DEFEND part
 attack-moves the Marines to `self_ramp` (`executed`), and the TRAIN_WORKER part
-issues one SCV train order, honestly narrated as `partially_executed` because
-the "keep SCV production continuous" constraint is not runtime-enforced. Live
-mode (the default, no `--dry-run`) lazily imports `sc2` and launches a local
-custom game; `--voice` enables push-to-talk capture with a transcription
-confidence gate (low-confidence Whisper output is re-prompted, never executed).
+issues one SCV train order while registering the deterministic
+`keep_worker_production` standing order. Live mode (the default, no
+`--dry-run`) lazily imports `sc2` and launches a local custom game; `--voice`
+enables push-to-talk capture with a transcription confidence gate
+(low-confidence Whisper output is re-prompted, never executed).
+
+### Step 7. LLM Interpreter, GUI, Event Memory, Standing Orders, BW Boundary — DONE
+
+Files:
+
+```text
+starcraft_commander/llm_interpreter.py
+starcraft_commander/event_memory.py
+starcraft_commander/web_gui.py
+starcraft_commander/standing_orders.py
+broodwar_commander/
+tests/test_llm_interpreter.py
+tests/test_event_memory.py
+tests/test_web_gui.py
+tests/test_standing_orders.py
+tests/test_bw_executor.py
+docs/roadmap-llm-gui.md
+```
+
+Implemented:
+
+- Rules-first LLM fallback via the optional `anthropic` extra, schema-gated to
+  the 10 canonical intents and called only once per user utterance.
+- Thread-safe bounded event memory for GUI history and state-report
+  enrichment.
+- Stdlib localhost-only web GUI for dry-run and live sessions.
+- Code-driven standing orders for continuous SCV production and supply-block
+  prevention, ticked from `on_step` rather than the LLM.
+- Brood War semantic executor boundary with BWAPI Terran vocabulary and
+  fake-based tests. A real BWAPI binding adapter remains environment-bound.
 
 ### Step 6. Local Smoke Test Instructions — DONE
 
@@ -332,11 +361,11 @@ The project compiles, tests, and dry-runs the full pipeline, but:
   installed StarCraft II. Executing `docs/sc2-smoke-test.md` end to end on a
   machine with SC2 is the top next task; expect python-sc2 API mismatches that
   the duck-typed fakes did not catch.
-- **BWAPI executor.** Brood War support has not started.
-- **Event memory.** No narration history, event log, or "what happened since my
-  last command" memory exists.
-- **LLM interpreter upgrades.** Interpretation is deterministic keyword
-  matching (see `docs/intent-inventory.md`); no LLM is involved anywhere.
+- **Real BWAPI adapter.** The Brood War semantic executor boundary exists, but
+  a live BWAPI binding adapter still requires a Brood War + BWAPI machine.
+- **Live Anthropic API verification.** The LLM fallback is covered by injected
+  client tests; a real API call requires `ANTHROPIC_API_KEY` and has not been
+  run here.
 - **Multi-race.** Terran-only MVP: costs, producers, and Korean vocabulary
   cover SCV/Marine/Hellion and the basic Terran structures.
 
@@ -423,7 +452,7 @@ Start with:
 
 ```bash
 git status --short --branch
-python3 -m pytest -q          # expect 636 passed, 1475 subtests passed
+python3 -m pytest -q          # expect 811 passed, 1757 subtests passed
 python3 -m starcraft_commander.demo_sc2 --dry-run --script "마린 6기 입구로 보내고 SCV 계속 찍어" "상황 보고해줘"
 sed -n '1,130p' starcraft_commander/__init__.py
 sed -n '1,110p' docs/sc2-smoke-test.md

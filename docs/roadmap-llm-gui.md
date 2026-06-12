@@ -29,10 +29,11 @@ voice), the system interprets it and maps it to StarCraft II API actions.
   clarification path when unavailable. GUI must be stdlib-only
   (`http.server`), bound to 127.0.0.1.
 - Baseline suite at start of this phase: 636 passed, 1475 subtests.
+- Final offline suite after this phase: 811 passed, 1757 subtests.
 
 ## Work items and status
 
-- [ ] **W1. LLM interpreter** (`starcraft_commander/llm_interpreter.py` +
+- [x] **W1. LLM interpreter** (`starcraft_commander/llm_interpreter.py` +
   `tests/test_llm_interpreter.py` + `pyproject.toml` llm extra +
   `runtime_deps.require_anthropic`)
   - `LLMCommandInterpreter` implements the existing
@@ -46,38 +47,38 @@ voice), the system interprets it and maps it to StarCraft II API actions.
     Korean clarification.
   - Default model `claude-haiku-4-5-20251001` (override via constructor/env),
     key from `ANTHROPIC_API_KEY`.
-- [ ] **W2. Event memory** (`starcraft_commander/event_memory.py` +
+- [x] **W2. Event memory** (`starcraft_commander/event_memory.py` +
   `tests/test_event_memory.py`) — thread-safe ring buffer of command
   outcomes with game time; feeds GUI history.
-- [ ] **W3. Web GUI** (`starcraft_commander/web_gui.py` +
+- [x] **W3. Web GUI** (`starcraft_commander/web_gui.py` +
   `tests/test_web_gui.py`) — stdlib ThreadingHTTPServer, embedded Korean
   single-page UI; endpoints `GET /` (HTML), `GET /api/state`,
   `GET /api/history?after=N`, `POST /api/command`; command POST enqueues,
   UI polls history (no cross-loop futures). 127.0.0.1 only.
-- [ ] **W4. Integration** — `live_pipeline.py` records outcomes into event
+- [x] **W4. Integration** — `live_pipeline.py` records outcomes into event
   memory; `demo_sc2.py` gains `--llm` and `--gui [PORT]` flags (work in
   dry-run AND live mode); package exports; full suite green.
-- [ ] **W5. Docs** — README, docs/sc2-smoke-test.md, claude-handoff.md,
+- [x] **W5. Docs** — README, docs/sc2-smoke-test.md, claude-handoff.md,
   architecture.md, contracts.md updated; this file's checkboxes ticked.
-- [ ] **W6. Adversarial review + fixes** — lenses: contract honesty, web
+- [x] **W6. Adversarial review + fixes** — lenses: contract honesty, web
   server security (localhost binding, input handling), LLM output safety
   (schema enforcement, prompt injection via game text), UX.
-- [ ] **W7. Final verification + semantic commits + push**
+- [x] **W7. Final verification + semantic commits + push**
 
 ## Extended scope (user directive: fill EVERY unfilled original-plan item)
 
-- [ ] **W8. Standing orders / tactical policies**
+- [x] **W8. Standing orders / tactical policies**
   (`starcraft_commander/standing_orders.py` + tests) — the original plan's
   `keep_worker_production` / `prevent_supply_block` semantics as in-game-loop
   code policies (never LLM-per-frame): continuous SCV production while
   active, automatic Supply Depot when supply nearly blocked. Wired into the
   live bot's `on_step` and dry-run; narrator discloses activation honestly
-  (replaces today's "지속 생산은 아직 지원되지 않아" disclosure).
-- [ ] **W9. Original-plan audit** — re-verify the ENTIRE original plan
+  (replaced the previous "지속 생산은 아직 지원되지 않아" disclosure).
+- [x] **W9. Original-plan audit** — re-verify the ENTIRE original plan
   (including the pre-session handoff text via
   `git show f990509:docs/claude-handoff.md`) against current code; any
   remaining unfilled item becomes a work item in this phase.
-- [ ] **W10. Brood War / BWAPI executor boundary**
+- [x] **W10. Brood War / BWAPI executor boundary**
   (`broodwar_commander/` package + tests) — mirrors the SC2 boundary at the
   pre-adapter level: Brood War Terran vocabulary (Vulture maps DIRECTLY, no
   Hellion stand-in), Intent DSL → semantic BW command plans, duck-typed
@@ -92,11 +93,9 @@ voice), the system interprets it and maps it to StarCraft II API actions.
 
 ## Resume instructions for the next agent
 
-1. `git log --oneline -15` — milestones are committed in order W1→W7.
-2. Unticked boxes above = remaining work. Tick boxes as you complete items.
-3. The Workflow journal (if the orchestrating session is alive) supports
-   resume via `resumeFromRunId`; otherwise re-run the unfinished items as
-   fresh agents using the specs above.
+1. `git log --oneline -15` — inspect the final commit that landed this phase.
+2. `python3 -m pytest -q` — expected offline result: 811 passed, 1757 subtests.
+3. Run the dry-run transcript command from README to verify user-facing output.
 4. Hard contracts that must survive: package imports clean with ZERO optional
    deps installed; never report skipped/partial work as success; rejected
    commands never mutate state and always carry Korean 이유+대안; no mouse

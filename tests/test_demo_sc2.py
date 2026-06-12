@@ -13,11 +13,15 @@ import io
 import json
 import subprocess
 import sys
+import threading
+import time
 import types
 import unittest
+import urllib.request
 from unittest import mock
 
 from starcraft_commander import demo_sc2
+from starcraft_commander.event_memory import CommanderEventMemory
 from starcraft_commander.live_pipeline import SC2CommandSession
 from starcraft_commander.map_resolver import (
     SC2_SUPPORTED_SEMANTIC_TARGETS,
@@ -25,21 +29,27 @@ from starcraft_commander.map_resolver import (
 )
 from starcraft_commander.python_sc2_adapter import PythonSC2BotAdapter
 from starcraft_commander.runtime_deps import (
+    MissingLLMDependencyError,
     MissingSC2RuntimeError,
     MissingVoiceDependencyError as RuntimeMissingVoiceDependencyError,
 )
+from starcraft_commander.standing_orders import StandingOrderController
 from starcraft_commander.state_resolver import resolve_commander_state
 from starcraft_commander.voice_input import (
     MicrophoneListener,
     MissingVoiceDependencyError,
     VoiceTranscription,
 )
+from starcraft_commander.web_gui import DEFAULT_WEB_GUI_PORT, WebGuiBridgeInterface
 
 
 PYTHON_SC2_INSTALLED = importlib.util.find_spec("sc2") is not None
 SOUNDDEVICE_INSTALLED = importlib.util.find_spec("sounddevice") is not None
 FASTER_WHISPER_INSTALLED = importlib.util.find_spec("faster_whisper") is not None
 VOICE_DEPS_INSTALLED = SOUNDDEVICE_INSTALLED and FASTER_WHISPER_INSTALLED
+ANTHROPIC_INSTALLED = importlib.util.find_spec("anthropic") is not None
+GUI_POLL_DEADLINE_SECONDS = 10.0
+GUI_POLL_INTERVAL_SECONDS = 0.05
 
 
 def build_fake_sc2_modules(run_game):
@@ -135,6 +145,8 @@ class ParseArgsTest(unittest.TestCase):
             "map": demo_sc2.DEFAULT_SC2_DEMO_MAP,
             "race": "terran",
             "difficulty": "easy",
+            "llm": False,
+            "gui": None,
         }
         for name, value in expected.items():
             with self.subTest(argument=name):
@@ -146,6 +158,20 @@ class ParseArgsTest(unittest.TestCase):
         )
         self.assertTrue(args.dry_run)
         self.assertEqual(["SCV 계속 찍어", "상태 알려줘"], args.script)
+
+    def test_gui_flag_defaults_to_web_gui_port_and_accepts_override(self) -> None:
+        cases = {
+            "bare flag": (["--dry-run", "--gui"], DEFAULT_WEB_GUI_PORT),
+            "explicit port": (["--dry-run", "--gui", "9000"], 9000),
+            "ephemeral port": (["--dry-run", "--gui", "0"], 0),
+        }
+        for label, (argv, expected_port) in cases.items():
+            with self.subTest(case=label):
+                self.assertEqual(expected_port, demo_sc2.parse_args(argv).gui)
+        self.assertEqual(8350, DEFAULT_WEB_GUI_PORT)
+
+    def test_llm_flag_parses(self) -> None:
+        self.assertTrue(demo_sc2.parse_args(["--dry-run", "--llm"]).llm)
 
 
 class DemoFakeBotTest(unittest.TestCase):
@@ -190,14 +216,16 @@ class DryRunScriptTest(unittest.TestCase):
             "명령> SCV 계속 찍어",
             "Intent DSL:",
             '"intent": "TRAIN_WORKER"',
-            # "계속 찍어" carries a continuity constraint no runtime enforces,
-            # so the demo discloses the partial honestly.
-            "[partially_executed] ",
+            # "계속 찍어" now activates the code-driven standing order instead
+            # of honestly degrading to a one-shot partial action.
+            "[executed] ",
             "SCV 1기 생산 명령",
-            "지속 생산은 아직 지원되지 않아",
+            "상비 명령 등록: 지속 SCV 생산",
             "명령> 상태 알려줘",
             "[read_only] ",
             "전장 상태를 확인했습니다",
+            "상비 명령: 지속 SCV 생산 활성",
+            "최근 명령 1건:",
             "미네랄 400",
         )
         for snippet in expected_snippets:
@@ -219,11 +247,11 @@ class DryRunScriptTest(unittest.TestCase):
             self.assertIn("[executed] ", output)
             self.assertIn("마린 6기", output)
             self.assertIn("공격 이동", output)
-        with self.subTest(part="SCV production disclosed as partial"):
+        with self.subTest(part="SCV production registers standing order"):
             self.assertIn("명령: SCV 계속 찍어", output)
-            self.assertIn("[partially_executed] ", output)
+            self.assertIn("[executed] ", output)
             self.assertIn("SCV 1기 생산 명령", output)
-            self.assertIn("지속 생산은 아직 지원되지 않아", output)
+            self.assertIn("상비 명령 등록: 지속 SCV 생산", output)
         with self.subTest(part="no untranslated unit group leaks"):
             narration_lines = [
                 line for line in output.splitlines() if line.startswith("[")

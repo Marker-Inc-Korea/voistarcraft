@@ -7,10 +7,13 @@ narrator components.
 """
 
 import json
+import subprocess
+import sys
 import unittest
 from types import SimpleNamespace
 
 from starcraft_commander.contracts import SC2ExecutionPlan, SC2PlanExecutionResult
+from starcraft_commander.event_memory import CommanderEventMemory
 from starcraft_commander.live_pipeline import (
     SC2_COMMAND_OUTCOME_STATUSES,
     SC2CommandOutcome,
@@ -18,8 +21,13 @@ from starcraft_commander.live_pipeline import (
     process_commander_text,
     split_compound_command,
 )
+from starcraft_commander.narrator import SC2KoreanNarrator
 from starcraft_commander.python_sc2_adapter import PythonSC2BotAdapter
 from starcraft_commander.sc2_executor import SC2RuntimeExecutor
+from starcraft_commander.standing_orders import (
+    CONSTRAINT_TO_STANDING_ORDER,
+    StandingOrderController,
+)
 from toycraft_commander.interpreter import (
     UNSUPPORTED_COMMAND_CLARIFICATION_PROMPT,
     UNSUPPORTED_COMMAND_CLARIFICATION_REASON,
@@ -496,6 +504,194 @@ class LivePipelineTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TypeError):
             SC2CommandSession(narrator=object())
 
+    async def test_session_rejects_invalid_optional_integrations(self) -> None:
+        with self.subTest(seam="event_memory without record()"):
+            with self.assertRaises(TypeError):
+                SC2CommandSession(event_memory=object())
+        with self.subTest(seam="standing_orders without controller surface"):
+            with self.assertRaises(TypeError):
+                SC2CommandSession(standing_orders=object())
+
+
+class LivePipelineIntegrationTest(unittest.IsolatedAsyncioTestCase):
+    """W4 integration: standing orders + event memory inside the session."""
+
+    def build_integrated_session(self, bot):
+        memory = CommanderEventMemory()
+        orders = StandingOrderController()
+        session = make_session(bot, event_memory=memory, standing_orders=orders)
+        return session, memory, orders
+
+    async def test_continuous_train_with_controller_is_executed_with_suffix(self) -> None:
+        # With a standing-order controller the continuous-production
+        # constraint is genuinely enforced: the outcome is full execution
+        # plus the honest Korean registration suffix, never the old
+        # "지속 생산 미지원" disclosure.
+        bot = LivePipelineFakeBot()
+        session, _memory, orders = self.build_integrated_session(bot)
+
+        outcomes = await session.process_text("SCV 계속 찍어")
+
+        self.assertEqual(1, len(outcomes))
+        outcome = outcomes[0]
+        self.assertEqual("executed", outcome.status)
+        self.assertIn("SCV 1기 생산 명령", outcome.narration)
+        self.assertTrue(outcome.narration.endswith("상비 명령 등록: 지속 SCV 생산."))
+        self.assertNotIn("지속 생산은 아직 지원되지 않아", outcome.narration)
+        self.assertEqual(("keep_worker_production",), orders.active_kinds())
+        self.assertEqual([("train", "CommandCenter", "SCV")], bot.issued_commands)
+
+    async def test_registered_order_keeps_training_across_manual_ticks(self) -> None:
+        # After "SCV 계속 찍어" registers the standing order, every manual
+        # tick (the live bot calls this from on_step) keeps issuing train
+        # orders to the fake Command Center — production really continues.
+        bot = LivePipelineFakeBot(supply_left=5)
+        session, _memory, orders = self.build_integrated_session(bot)
+        await session.process_text("SCV 계속 찍어")
+        baseline = len(bot.issued_commands)
+
+        for tick_round in range(3):
+            with self.subTest(tick_round=tick_round):
+                ticks = await orders.tick(bot)
+                self.assertEqual(1, len(ticks))
+                self.assertTrue(ticks[0].issued)
+                self.assertEqual(("train_scv",), ticks[0].actions_issued)
+
+        train_commands = bot.issued_commands[baseline:]
+        self.assertEqual([("train", "CommandCenter", "SCV")] * 3, train_commands)
+
+    async def test_second_continuous_command_does_not_reannounce_registration(self) -> None:
+        bot = LivePipelineFakeBot()
+        session, _memory, orders = self.build_integrated_session(bot)
+
+        first = (await session.process_text("SCV 계속 찍어"))[0]
+        second = (await session.process_text("SCV 계속 찍어"))[0]
+
+        self.assertIn("상비 명령 등록", first.narration)
+        self.assertEqual("executed", second.status)
+        self.assertNotIn("상비 명령 등록", second.narration)
+        self.assertEqual(("keep_worker_production",), orders.active_kinds())
+
+    async def test_blocked_command_never_registers_standing_orders(self) -> None:
+        bot = LivePipelineFakeBot(minerals=0)
+        session, memory, orders = self.build_integrated_session(bot)
+
+        outcomes = await session.process_text("서플 막히지 않게 해줘")
+
+        self.assertEqual("blocked", outcomes[0].status)
+        self.assertEqual((), orders.active_kinds())
+        self.assertNotIn("상비 명령 등록", outcomes[0].narration)
+        # The blocked outcome is still honestly recorded into memory.
+        events = memory.recent(1)
+        self.assertEqual("blocked", events[0].status)
+
+    async def test_summarize_state_is_enriched_with_orders_and_recent_events(self) -> None:
+        bot = LivePipelineFakeBot()
+        session, _memory, _orders = self.build_integrated_session(bot)
+        await session.process_text("SCV 계속 찍어")
+
+        outcomes = await session.process_text("상태 알려줘")
+
+        self.assertEqual(1, len(outcomes))
+        outcome = outcomes[0]
+        self.assertEqual("read_only", outcome.status)
+        for fragment in (
+            "전장 상태를 확인했습니다",
+            "상비 명령: 지속 SCV 생산 활성",
+            "최근 명령 1건:",
+            "- #1 [executed]",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, outcome.narration)
+
+    async def test_summarize_state_without_prior_commands_reports_empty_memory(self) -> None:
+        bot = LivePipelineFakeBot()
+        session, _memory, _orders = self.build_integrated_session(bot)
+
+        outcome = (await session.process_text("상태 알려줘"))[0]
+
+        self.assertIn("상비 명령: 없음", outcome.narration)
+        self.assertIn("최근 명령 0건", outcome.narration)
+
+    async def test_event_memory_records_every_outcome_with_game_time(self) -> None:
+        bot = LivePipelineFakeBot(minerals=0)
+        session, memory, _orders = self.build_integrated_session(bot)
+
+        await session.process_text("배럭 지어")  # blocked (no minerals)
+        await session.process_text("피아노 쳐줘")  # clarification
+
+        events = memory.recent(10)
+        self.assertEqual(2, len(events))
+        blocked_event, clarification_event = events
+        with self.subTest(event="blocked"):
+            self.assertEqual(1, blocked_event.seq)
+            self.assertEqual("배럭 지어", blocked_event.command_text)
+            self.assertEqual("blocked", blocked_event.status)
+            # Game time comes from the resolved state (fake bot.time = 20.0).
+            self.assertEqual(20.0, blocked_event.game_time_seconds)
+            self.assertEqual("BUILD_STRUCTURE", blocked_event.intent_name)
+        with self.subTest(event="clarification"):
+            self.assertEqual(2, clarification_event.seq)
+            self.assertEqual("피아노 쳐줘", clarification_event.command_text)
+            self.assertEqual("clarification", clarification_event.status)
+            # No state is ever resolved for clarifications: no game time.
+            self.assertIsNone(clarification_event.game_time_seconds)
+
+    async def test_compound_command_records_one_event_per_part(self) -> None:
+        bot = LivePipelineFakeBot()
+        session, memory, _orders = self.build_integrated_session(bot)
+
+        await session.process_text("SCV 계속 찍어 그리고 피아노 쳐줘")
+
+        events = memory.recent(10)
+        self.assertEqual(2, len(events))
+        self.assertEqual("SCV 계속 찍어", events[0].command_text)
+        self.assertEqual("executed", events[0].status)
+        self.assertEqual("피아노 쳐줘", events[1].command_text)
+        self.assertEqual("clarification", events[1].status)
+
+    async def test_controller_session_upgrades_default_korean_narrator(self) -> None:
+        session, _memory, _orders = self.build_integrated_session(
+            LivePipelineFakeBot()
+        )
+        self.assertIsInstance(session.narrator, SC2KoreanNarrator)
+        for constraint in CONSTRAINT_TO_STANDING_ORDER:
+            with self.subTest(constraint=constraint):
+                self.assertIn(constraint, session.narrator.enforced_constraints)
+
+    async def test_custom_narrator_is_never_replaced(self) -> None:
+        class CustomNarrator:
+            def narrate_plan_result(self, result):
+                raise AssertionError("not exercised here")
+
+            def narrate_state(self, state):
+                raise AssertionError("not exercised here")
+
+            def narrate_rejection(self, feasibility):
+                raise AssertionError("not exercised here")
+
+        custom = CustomNarrator()
+        session = make_session(
+            LivePipelineFakeBot(),
+            narrator=custom,
+            standing_orders=StandingOrderController(),
+        )
+        self.assertIs(custom, session.narrator)
+
+    async def test_session_without_controller_keeps_honest_disclosure(self) -> None:
+        # Memory alone must not change narration: without a controller the
+        # continuous-production disclosure (and partial status) survives.
+        bot = LivePipelineFakeBot()
+        memory = CommanderEventMemory()
+        session = make_session(bot, event_memory=memory)
+
+        outcome = (await session.process_text("SCV 계속 찍어"))[0]
+
+        self.assertEqual("partially_executed", outcome.status)
+        self.assertIn("지속 생산은 아직 지원되지 않아", outcome.narration)
+        self.assertNotIn("상비 명령 등록", outcome.narration)
+        self.assertEqual("partially_executed", memory.recent(1)[0].status)
+
 
 class PackageExportTest(unittest.TestCase):
     def test_package_lazily_exports_live_pipeline_symbols(self) -> None:
@@ -517,6 +713,53 @@ class PackageExportTest(unittest.TestCase):
         # The clarification path reuses interpreter wording; pin the reason
         # constant the pipeline depends on indirectly.
         self.assertIn("10 MVP", UNSUPPORTED_COMMAND_CLARIFICATION_REASON)
+
+    def test_package_lazily_exports_phase_integration_symbols(self) -> None:
+        import starcraft_commander
+
+        for name in (
+            "LLMCommandInterpreter",
+            "HybridCommandInterpreter",
+            "build_hybrid_interpreter",
+            "CommanderEvent",
+            "CommanderEventMemory",
+            "WebGuiServer",
+            "SessionLoopBridge",
+            "StandingOrderController",
+            "MissingLLMDependencyError",
+            "is_anthropic_available",
+            "require_anthropic",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(hasattr(starcraft_commander, name))
+                self.assertIn(name, starcraft_commander.__all__)
+        self.assertIs(
+            CommanderEventMemory, starcraft_commander.CommanderEventMemory
+        )
+        self.assertIs(
+            StandingOrderController, starcraft_commander.StandingOrderController
+        )
+
+    def test_package_import_stays_dependency_free_with_new_exports(self) -> None:
+        # The new lazy exports must not drag optional dependencies (or
+        # ToyCraft) into a bare package import.
+        script = (
+            "import json, sys; "
+            "import starcraft_commander; "
+            "print(json.dumps({name: (name in sys.modules) for name in ("
+            "'anthropic', 'sc2', 'faster_whisper', 'sounddevice', "
+            "'toycraft_commander')}, sort_keys=True))"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        payload = json.loads(completed.stdout)
+        for module_name, loaded in payload.items():
+            with self.subTest(module=module_name):
+                self.assertFalse(loaded)
 
 
 if __name__ == "__main__":

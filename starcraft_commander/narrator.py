@@ -183,7 +183,30 @@ class SC2NarratorInterface(Protocol):
 
 @dataclass(frozen=True)
 class SC2KoreanNarrator:
-    """Default Korean narrator for live SC2 plan results and state summaries."""
+    """Default Korean narrator for live SC2 plan results and state summaries.
+
+    ``enforced_constraints`` names the plan constraints some runtime
+    component genuinely enforces (for example ``keep SCV production
+    continuous`` once a standing-order controller is registered by the live
+    session). Those constraints are narrated as full execution instead of
+    the unenforced-constraint partial disclosure. The default (empty set)
+    keeps today's honest ``지속 생산 미지원`` disclosure for every session
+    without standing-order support.
+    """
+
+    enforced_constraints: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        if isinstance(self.enforced_constraints, (str, bytes)):
+            raise TypeError(
+                "SC2 narrator enforced_constraints must be a set of constraint "
+                "strings, not a single string."
+            )
+        object.__setattr__(
+            self,
+            "enforced_constraints",
+            frozenset(str(item) for item in self.enforced_constraints),
+        )
 
     def narrate_plan_result(self, result: SC2PlanExecutionResult) -> SC2NarrationResponse:
         """Render one structured plan execution result into Korean narration.
@@ -191,14 +214,18 @@ class SC2KoreanNarrator:
         Full success narrates every applied action; an observe-only success is
         a read-only state report; a successful plan carrying a constraint no
         runtime enforces (for example continuous production) is disclosed as
-        partial; anything else is clearly narrated as partial or blocked so
-        skipped or unsupported work is never reported as success.
+        partial unless the constraint is listed in
+        :attr:`enforced_constraints`; anything else is clearly narrated as
+        partial or blocked so skipped or unsupported work is never reported
+        as success.
         """
 
         if result.success:
             if _is_observe_only(result.plan):
                 return _render_read_only_result(result)
-            disclosures = _unenforced_constraint_disclosures(result.plan)
+            disclosures = _unenforced_constraint_disclosures(
+                result.plan, self.enforced_constraints
+            )
             if disclosures:
                 return _render_constraint_disclosure_result(result, disclosures)
             return _render_full_success(result)
@@ -318,13 +345,23 @@ def _render_constraint_disclosure_result(
     )
 
 
-def _unenforced_constraint_disclosures(plan: SC2ExecutionPlan) -> tuple[str, ...]:
-    """Return Korean disclosures for plan constraints no runtime enforces."""
+def _unenforced_constraint_disclosures(
+    plan: SC2ExecutionPlan,
+    enforced_constraints: frozenset[str] = frozenset(),
+) -> tuple[str, ...]:
+    """Return Korean disclosures for plan constraints no runtime enforces.
+
+    Constraints listed in ``enforced_constraints`` (for example the
+    continuous-production constraint once a standing-order controller is
+    wired into the session) are excluded: a runtime really enforces them, so
+    disclosing them as dropped would itself be dishonest narration.
+    """
 
     return tuple(
         SC2_UNENFORCED_CONSTRAINT_DISCLOSURES[constraint]
         for constraint in plan.constraints
         if constraint in SC2_UNENFORCED_CONSTRAINT_DISCLOSURES
+        and constraint not in enforced_constraints
     )
 
 
