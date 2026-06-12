@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Final, Protocol, runtime_checkable
 
 from toycraft_commander.failure import (
@@ -18,6 +21,7 @@ from toycraft_commander.intents import (
     IntentCommandPayload,
     IntentName,
     IntentPayload,
+    Priority,
     RepairIntent,
     ScoutIntent,
     StructureName,
@@ -178,6 +182,7 @@ GATHER_RESOURCE_ALIAS: Final[str] = "gather_resource"
 GATHER_RESOURCE_CONSTRAINT: Final[str] = "assign workers to requested resource"
 KEEP_WORKER_PRODUCTION_ALIAS: Final[str] = "keep_worker_production"
 KEEP_WORKER_PRODUCTION_CONSTRAINT: Final[str] = "keep SCV production continuous"
+TRAIN_WORKER_ONESHOT_CONSTRAINT: Final[str] = "train requested SCV count"
 PREVENT_SUPPLY_BLOCK_ALIAS: Final[str] = "prevent_supply_block"
 PREVENT_SUPPLY_BLOCK_CONSTRAINT: Final[str] = "prevent supply block"
 PREVENT_SUPPLY_BLOCK_LOCATION: Final[str] = "main ramp"
@@ -215,6 +220,7 @@ REPAIR_ALIAS: Final[str] = "repair"
 REPAIR_CONSTRAINT: Final[str] = "repair damaged Terran target"
 EXPAND_ALIAS: Final[str] = "expand"
 EXPAND_CONSTRAINT: Final[str] = "take a feasible Terran expansion"
+EXPAND_DEFAULT_LOCATION: Final[str] = "natural expansion"
 
 COMMAND_PATTERN_LEXICON_CATEGORIES: Final[tuple[str, ...]] = (
     "unit_selection",
@@ -1077,9 +1083,11 @@ class CommandInterpreter:
     def interpret(self, command_text: str) -> CommandInterpretationResult:
         """Return payload or a commander-facing clarification prompt."""
 
+        payload, candidates = _resolve_command_payload(command_text, self.mappings)
         return _build_command_interpretation_result(
             command_text=command_text,
-            payload=self.interpret_text(command_text),
+            payload=payload,
+            candidates=candidates,
         )
 
 
@@ -1093,130 +1101,57 @@ def _interpret_command_text_with_mappings(
 ) -> IntentPayload | None:
     """Return the nearest supported typed Intent DSL payload for Korean text."""
 
+    payload, _ = _resolve_command_payload(command_text, mappings)
+    return payload
+
+
+def _resolve_command_payload(
+    command_text: str,
+    mappings: tuple[InterpreterMapping, ...],
+) -> tuple[IntentPayload | None, tuple[ClarificationCandidate, ...]]:
+    """Resolve one command through the single ordered intent-family registry.
+
+    Exact utterance matches resolve first. Otherwise the ordered candidate
+    list is computed exactly once: one family match resolves directly, two or
+    more surface the clarification candidates, and zero of either yields the
+    unsupported-command case downstream.
+    """
+
     normalized_command = _normalize_command_text(command_text)
     if not normalized_command:
-        return None
+        return None, ()
 
+    exact_payload = _normalized_utterance_index(mappings).get(normalized_command)
+    if exact_payload is not None:
+        return exact_payload, ()
+
+    candidates = _build_ambiguous_command_candidates(normalized_command)
+    if len(candidates) == 1:
+        return candidates[0].payload, ()
+    return None, candidates
+
+
+@lru_cache(maxsize=None)
+def _normalized_utterance_index(
+    mappings: tuple[InterpreterMapping, ...],
+) -> dict[str, IntentPayload]:
+    """Precompute the normalized exact-match lookup once per mapping table.
+
+    First-listed mappings win duplicate normalized utterances, matching the
+    historical first-match loop order.
+    """
+
+    index: dict[str, IntentPayload] = {}
     for mapping in mappings:
-        if normalized_command == _normalize_command_text(mapping.utterance):
-            return mapping.payload
-
-    if _is_ambiguous_command(normalized_command):
-        return None
-
-    if _looks_like_gather_resource(normalized_command):
-        resource = _detect_resource_name(normalized_command)
-        if resource is not None:
-            return GatherResourceIntent(
-                priority=_detect_gather_resource_priority(normalized_command, resource),
-                constraints=(GATHER_RESOURCE_CONSTRAINT,),
-                resource=resource,
-                worker_count=_detect_count(normalized_command, default=3),
-                base=_detect_worker_base(normalized_command),
-            )
-
-    if _looks_like_keep_worker_production(normalized_command):
-        return TrainWorkerIntent(
-            priority="normal",
-            constraints=(KEEP_WORKER_PRODUCTION_CONSTRAINT,),
-            count=1,
-        )
-
-    if _looks_like_prevent_supply_block(normalized_command):
-        return BuildStructureIntent(
-            priority="high",
-            constraints=(PREVENT_SUPPLY_BLOCK_CONSTRAINT,),
-            structure="Supply Depot",
-            location=PREVENT_SUPPLY_BLOCK_LOCATION,
-        )
-
-    if _looks_like_repair(normalized_command):
-        return RepairIntent(
-            priority=_detect_repair_priority(normalized_command),
-            constraints=(REPAIR_CONSTRAINT,),
-            target=_detect_repair_target(normalized_command),
-            worker_count=_detect_count(normalized_command, default=1),
-        )
-
-    build_structure_target = _build_structure_target_from_command(normalized_command)
-    if build_structure_target is not None:
-        structure, location = build_structure_target
-        priority = "high" if structure in ("Refinery", "Bunker") else "normal"
-        return BuildStructureIntent(
-            priority=priority,
-            constraints=(BUILD_STRUCTURE_CONSTRAINT,),
-            structure=structure,
-            location=location,
-        )
-
-    if _looks_like_train_unit(normalized_command):
-        return TrainArmyIntent(
-            priority=_detect_train_unit_priority(normalized_command),
-            constraints=(TRAIN_UNIT_CONSTRAINT,),
-            unit_type="Marine",
-            count=_detect_train_unit_count(normalized_command),
-        )
-
-    if _looks_like_send_scout(normalized_command):
-        return ScoutIntent(
-            priority=_detect_send_scout_priority(normalized_command),
-            constraints=(SEND_SCOUT_CONSTRAINT,),
-            target=_detect_send_scout_target(normalized_command),
-            unit_group=_detect_send_scout_unit_group(normalized_command),
-        )
-
-    if _looks_like_defend_ramp(normalized_command):
-        return DefendIntent(
-            priority=_detect_defend_ramp_priority(normalized_command),
-            constraints=(DEFEND_RAMP_CONSTRAINT,),
-            location=DEFEND_RAMP_LOCATION,
-            unit_group=_detect_defend_ramp_unit_group(normalized_command),
-        )
-
-    if _looks_like_retreat_army(normalized_command):
-        return DefendIntent(
-            priority=_detect_retreat_army_priority(normalized_command),
-            constraints=(RETREAT_ARMY_CONSTRAINT,),
-            location=RETREAT_ARMY_LOCATION,
-            unit_group=_detect_retreat_army_unit_group(normalized_command),
-        )
-
-    if _looks_like_harass_mineral_line(normalized_command):
-        return HarassIntent(
-            priority=_detect_harass_mineral_line_priority(normalized_command),
-            constraints=(HARASS_MINERAL_LINE_CONSTRAINT,),
-            target=HARASS_MINERAL_LINE_TARGET,
-            unit_group=_detect_harass_mineral_line_unit_group(normalized_command),
-        )
-
-    if _looks_like_pressure_enemy_expansion(normalized_command):
-        return HarassIntent(
-            priority=_detect_pressure_enemy_expansion_priority(normalized_command),
-            constraints=(PRESSURE_ENEMY_EXPANSION_CONSTRAINT,),
-            target=PRESSURE_ENEMY_EXPANSION_TARGET,
-            unit_group=_detect_pressure_enemy_expansion_unit_group(normalized_command),
-        )
-
-    if _looks_like_expand(normalized_command):
-        return ExpandIntent(
-            priority=_detect_expand_priority(normalized_command),
-            constraints=(EXPAND_CONSTRAINT,),
-            location=_detect_expand_location(normalized_command),
-        )
-
-    if _looks_like_summarize_state(normalized_command):
-        return SummarizeStateIntent(
-            priority="normal",
-            constraints=(SUMMARIZE_STATE_CONSTRAINT,),
-        )
-
-    return None
+        index.setdefault(_normalize_command_text(mapping.utterance), mapping.payload)
+    return index
 
 
 def _build_command_interpretation_result(
     *,
     command_text: str,
     payload: IntentPayload | None,
+    candidates: tuple[ClarificationCandidate, ...] = (),
 ) -> CommandInterpretationResult:
     """Return payload or a commander-facing clarification prompt."""
 
@@ -1245,7 +1180,6 @@ def _build_command_interpretation_result(
             clarification_required=False,
         )
 
-    candidates = _build_ambiguous_command_candidates(normalized_command)
     if len(candidates) > 1:
         candidate_metadata = {
             "candidates": [candidate.to_dict() for candidate in candidates],
@@ -1297,40 +1231,25 @@ def interpret_command(command_text: str) -> CommandInterpretationResult:
     return DEFAULT_COMMAND_INTERPRETER.interpret(command_text)
 
 
-def _is_ambiguous_command(normalized_command: str) -> bool:
-    if not normalized_command:
-        return False
-
-    return len(_build_ambiguous_command_candidates(normalized_command)) > 1
-
-
 def _build_ambiguous_command_candidates(
     normalized_command: str,
 ) -> tuple[ClarificationCandidate, ...]:
+    """Build ordered candidates from the single intent-family registry."""
+
     if not normalized_command:
         return ()
 
-    candidates = tuple(
-        candidate
-        for candidate in (
-            _candidate_gather_resource(normalized_command),
-            _candidate_keep_worker_production(normalized_command),
-            _candidate_prevent_supply_block(normalized_command),
-            _candidate_repair(normalized_command),
-            _candidate_build_structure(normalized_command),
-            _candidate_train_unit(normalized_command),
-            _candidate_send_scout(normalized_command),
-            _candidate_defend_ramp(normalized_command),
-            _candidate_retreat_army(normalized_command),
-            _candidate_harass_mineral_line(normalized_command),
-            _candidate_pressure_enemy_expansion(normalized_command),
-            _candidate_expand(normalized_command),
-            _candidate_summarize_state(normalized_command),
-        )
-        if candidate is not None
-    )
     deduplicated: dict[tuple[str, str], ClarificationCandidate] = {}
-    for candidate in candidates:
+    for spec in INTENT_CANDIDATE_SPECS:
+        spec_payload = spec.build_payload(normalized_command)
+        if spec_payload is None:
+            continue
+        candidate = ClarificationCandidate(
+            alias=spec.alias,
+            intent=spec.intent,
+            description=spec.description,
+            payload=spec_payload,
+        )
         key = (candidate.alias, repr(candidate.payload.to_dict()))
         deduplicated.setdefault(key, candidate)
     return tuple(deduplicated.values())
@@ -1352,318 +1271,507 @@ def _build_ambiguous_clarification_prompt(
     )
 
 
-def _candidate_gather_resource(
-    normalized_command: str,
-) -> ClarificationCandidate | None:
-    if not _looks_like_gather_resource(normalized_command):
-        return None
-    resource = _detect_resource_name(normalized_command)
-    if resource is None:
-        return None
-    return ClarificationCandidate(
-        alias=GATHER_RESOURCE_ALIAS,
-        intent="GATHER_RESOURCE",
-        description="자원 채취 명령",
-        payload=GatherResourceIntent(
-            priority=_detect_gather_resource_priority(normalized_command, resource),
-            constraints=(GATHER_RESOURCE_CONSTRAINT,),
-            resource=resource,
-            worker_count=_detect_count(normalized_command, default=3),
-            base=_detect_worker_base(normalized_command),
+def _normalize_command_text(command_text: str) -> str:
+    if not isinstance(command_text, str):
+        return ""
+    return "".join(command_text.casefold().split())
+
+
+def _normalize_patterns(patterns: tuple[str, ...]) -> tuple[str, ...]:
+    """Normalize a constant pattern tuple once at module definition time."""
+
+    return tuple(_normalize_command_text(pattern) for pattern in patterns)
+
+
+def _contains_any_pattern(normalized_command: str, patterns: tuple[str, ...]) -> bool:
+    """Return True when any pre-normalized pattern occurs in the command."""
+
+    return any(pattern in normalized_command for pattern in patterns)
+
+
+_WORKER_SUBJECT_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    (
+        "SCV",
+        # Whisper renders the spoken letters S-C-V in several hangul forms;
+        # all common transliterations must resolve, not just one.
+        "에스시비",
+        "에스씨브이",
+        "에스시브이",
+        "에스씨비",
+        "일꾼",
+        "worker",
+        "workers",
+    ),
+)
+_PRODUCTION_CONTINUITY_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("계속", "유지", "쉬지말고", "끊기지않게", "keep", "continuous", "constantly"),
+)
+_WORKER_TRAINING_VERB_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("찍어", "뽑아", "생산", "만들", "눌러", "train", "produce", "queue", "make"),
+)
+_GATHER_ACTION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    (
+        "붙여",
+        "붙이고",
+        "붙여줘",
+        "채취",
+        "캐",
+        "캐게",
+        "보내",
+        "assign",
+        "gather",
+        "mine",
+        "harvest",
+    ),
+)
+_GAS_RESOURCE_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("가스", "vespene", "gas"),
+)
+_MINERAL_RESOURCE_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("미네랄", "광물", "mineral", "minerals"),
+)
+_NATURAL_BASE_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("앞마당", "내추럴", "natural", "expansion"),
+)
+_SUPPLY_SUBJECT_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("서플", "서플라이", "디포", "보급고", "인구", "supply", "supply depot", "depot"),
+)
+_SUPPLY_PRESSURE_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("막히", "안막히", "트이", "부족", "늘려", "뚫", "미리", "block", "blocked", "cap", "room"),
+)
+_SUPPLY_BUILD_VERB_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("지어", "올려", "건설", "짓", "확보", "build", "construct", "raise"),
+)
+_STRUCTURE_NAME_ALIASES: Final[tuple[tuple[StructureName, tuple[str, ...]], ...]] = (
+    (
+        "Supply Depot",
+        _normalize_patterns(
+            ("서플라이디포", "서플라이", "서플", "보급고", "supplydepot", "depot"),
         ),
-    )
-
-
-def _candidate_keep_worker_production(
-    normalized_command: str,
-) -> ClarificationCandidate | None:
-    if not _looks_like_keep_worker_production(normalized_command):
-        return None
-    return ClarificationCandidate(
-        alias=KEEP_WORKER_PRODUCTION_ALIAS,
-        intent="TRAIN_WORKER",
-        description="SCV 생산 유지 명령",
-        payload=TrainWorkerIntent(
-            priority="normal",
-            constraints=(KEEP_WORKER_PRODUCTION_CONSTRAINT,),
-            count=1,
+    ),
+    ("Barracks", _normalize_patterns(("배럭스", "배럭", "병영", "barracks", "rax"))),
+    ("Refinery", _normalize_patterns(("리파이너리", "정제소", "가스통", "refinery"))),
+    ("Bunker", _normalize_patterns(("벙커", "bunker"))),
+    (
+        "Command Center",
+        _normalize_patterns(
+            ("커맨드센터", "커맨드", "commandcenter", "commandcentre", "cc"),
         ),
-    )
+    ),
+)
+_BUILD_STRUCTURE_VERB_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("지어", "지어서", "짓", "올려", "건설", "만들", "build", "construct", "make", "raise"),
+)
+_NATURAL_LOCATION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("앞마당", "natural"),
+)
+_CHOKE_HINT_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("입구", "언덕", "초크", "쪽", "choke"),
+)
+_RAMP_LOCATION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("입구", "언덕", "램프", "ramp"),
+)
+_GEYSER_LOCATION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("가스", "geyser"),
+)
+_EXPANSION_LOCATION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("앞마당", "멀티", "확장", "natural", "expansion"),
+)
+_MAIN_BASE_LOCATION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("본진", "main base", "base"),
+)
+_MARINE_UNIT_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("마린", "해병", "marine", "marines"),
+)
+_ARMY_TRAINING_VERB_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    (
+        "찍어",
+        "뽑아",
+        "생산",
+        "만들",
+        "추가",
+        "눌러",
+        "뽑",
+        "train",
+        "produce",
+        "queue",
+        "make",
+    ),
+)
+_SCOUT_ACTION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("정찰", "확인", "체크", "봐", "보러", "살펴", "scout", "check", "send"),
+)
+_SCOUT_TARGET_CONTEXT_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    (
+        "적",
+        "상대",
+        "enemy",
+        "앞마당",
+        "본진",
+        "입구",
+        "미네랄",
+        "natural",
+        "front",
+        "main",
+    ),
+)
+_SCOUT_MINERAL_TARGET_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("미네랄", "mineral", "mineral line"),
+)
+_SCOUT_NATURAL_TARGET_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("앞마당", "내추럴", "natural"),
+)
+_SCOUT_MAIN_TARGET_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("본진", "main", "main base"),
+)
+_SCOUT_FRONT_TARGET_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("입구", "front", "초크"),
+)
+_RAMP_DEFENSE_LOCATION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("입구", "램프", "언덕", "ramp", "choke"),
+)
+_SCOUT_EXCLUSIVE_ACTION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("정찰", "체크", "확인", "살펴", "scout", "check"),
+)
+"""Scout-only verbs that must keep ramp commands out of the defend family.
+
+These deliberately exclude the shared movement verbs (보내, send, 봐) so
+``마린 6기 입구로 보내`` still resolves to ramp defense while ``적 입구 정찰
+보내`` resolves to a scout order instead of bouncing as ambiguous.
+"""
+_DEFENSE_EXCLUSIVE_ACTION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    (
+        "막아",
+        "막고",
+        "막게",
+        "수비",
+        "방어",
+        "지켜",
+        "세워",
+        "홀드",
+        "hold",
+        "defend",
+        "guard",
+        "rally",
+    ),
+)
+"""Defense-only verbs that keep explicitly mixed commands ambiguous.
+
+``정찰 보내고 입구 막아`` names both a scout verb and a defense verb, so it
+must stay a multi-intent clarification (and split per part in the live
+pipeline) instead of silently resolving to a single scout order.
+"""
+_RAMP_DEFENSE_ACTION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    (
+        "막아",
+        "막고",
+        "막게",
+        "수비",
+        "방어",
+        "지켜",
+        "세워",
+        "홀드",
+        "보내",
+        "이동",
+        "가서",
+        "가라",
+        "hold",
+        "defend",
+        "guard",
+        "send",
+        "move",
+        "rally",
+    ),
+)
+_ARMY_SUBJECT_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("병력", "마린", "해병", "marine", "marines", "army"),
+)
+_RETREAT_ACTION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    (
+        "뒤로",
+        "후퇴",
+        "빠져",
+        "빼",
+        "빼고",
+        "살려",
+        "회군",
+        "pullback",
+        "pull back",
+        "fallback",
+        "fall back",
+        "retreat",
+    ),
+)
+_ENEMY_EXPANSION_TARGET_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    (
+        "상대앞마당",
+        "적앞마당",
+        "적내추럴",
+        "상대내추럴",
+        "상대멀티",
+        "적멀티",
+        "enemynatural",
+        "enemy natural",
+        "enemyexpansion",
+        "enemy expansion",
+        "enemyexpo",
+    ),
+)
+_PRESSURE_EXPANSION_WORD_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("앞마당", "내추럴", "멀티", "확장", "natural", "expansion"),
+)
+_ENEMY_OWNER_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("적", "상대", "enemy"),
+)
+_PRESSURE_ACTION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    (
+        "압박",
+        "견제",
+        "방해",
+        "흔들",
+        "찌르",
+        "괴롭",
+        "공격",
+        "pressure",
+        "harass",
+        "deny",
+        "attack",
+        "hit",
+        "strike",
+    ),
+)
+_MINERAL_LINE_TARGET_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    (
+        "미네랄라인",
+        "일꾼라인",
+        "상대미네랄",
+        "적미네랄",
+        "mineralline",
+        "mineral line",
+        "enemyminerals",
+        "enemy minerals",
+    ),
+)
+_WORKER_WORD_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("일꾼", "worker", "workers"),
+)
+_GATHER_LINE_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("채취", "캐", "라인", "line"),
+)
+_HARASS_ACTION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    (
+        "견제",
+        "흔들",
+        "괴롭",
+        "방해",
+        "찌르",
+        "공격",
+        "harass",
+        "disrupt",
+        "deny",
+        "attack",
+        "hit",
+        "raid",
+    ),
+)
+_REPAIR_TARGET_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    (
+        "벙커",
+        "배럭",
+        "병영",
+        "서플",
+        "보급고",
+        "커맨드",
+        "bunker",
+        "barracks",
+        "depot",
+        "commandcenter",
+        "command center",
+    ),
+)
+_REPAIR_ACTION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("수리", "고쳐", "고치", "복구", "repair", "fix", "restore"),
+)
+_REPAIR_BUNKER_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("벙커", "bunker"),
+)
+_REPAIR_BARRACKS_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("배럭", "병영", "barracks"),
+)
+_REPAIR_DEPOT_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("서플", "보급고", "depot"),
+)
+_REPAIR_COMMAND_CENTER_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("커맨드센터", "커맨드", "commandcenter", "command center"),
+)
+_EXPAND_LOCATION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("앞마당", "내추럴", "멀티", "확장", "natural", "expansion", "expo"),
+)
+_EXPAND_ACTION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    (
+        "가져",
+        "먹어",
+        "먹자",
+        "펴",
+        "확장",
+        "멀티",
+        "준비",
+        "커맨드센터",
+        "커맨드",
+        "expand",
+        "take",
+        "secure",
+        "prepare",
+        "commandcenter",
+        "command center",
+        "cc",
+    ),
+)
+_STATE_SUBJECT_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("상태", "상황", "현황", "브리핑", "요약", "status", "state", "summary"),
+)
+_SUMMARY_ACTION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("알려", "보여", "요약", "브리핑", "정리", "보고", "show", "summarize", "brief", "report"),
+)
+_CURRENT_ACTIVITY_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("뭐하고", "어떻게되고", "무슨일", "whatsgoingon", "whatshappening"),
+)
+_COUNT_KEYWORDS: Final[tuple[tuple[int, tuple[str, ...]], ...]] = (
+    # English aliases stop at the single digits below: short English number
+    # words are unsafe substrings ("ten" occurs inside "scout enemy"), and
+    # English digit counts are covered exactly by _DIGIT_COUNT_PATTERN.
+    (12, _normalize_patterns(("열두기", "열두마리", "열둘"))),
+    (11, _normalize_patterns(("열한기", "열한마리", "열하나"))),
+    (10, _normalize_patterns(("열기", "열마리"))),
+    (9, _normalize_patterns(("아홉기", "아홉마리", "아홉"))),
+    (8, _normalize_patterns(("여덟기", "8기", "여덟", "eight"))),
+    (7, _normalize_patterns(("일곱기", "7기", "일곱", "seven"))),
+    (6, _normalize_patterns(("여섯기", "6기", "여섯", "six"))),
+    (5, _normalize_patterns(("다섯기", "5기", "다섯", "five"))),
+    (4, _normalize_patterns(("네기", "4기", "넷", "네마리", "four"))),
+    (3, _normalize_patterns(("세기", "3기", "셋", "세마리", "three"))),
+    (2, _normalize_patterns(("두기", "2기", "둘", "두마리", "two"))),
+    (1, _normalize_patterns(("한기", "1기", "하나", "한마리", "하나씩", "one"))),
+)
+"""Korean and English count aliases checked from the largest count down.
+
+Native compound numerals (열두기 = 12) are listed before their substrings
+(두기 = 2) so descending iteration never matches a fragment of a larger
+numeral. Digit counts are parsed separately and exactly by
+``_DIGIT_COUNT_PATTERN``, never by substring.
+"""
+
+_DIGIT_COUNT_PATTERN: Final[re.Pattern[str]] = re.compile(r"(\d+)(?:기|마리|명)")
+"""Exact digit-count parser on normalized text: ``12기`` is 12, never 2.
+
+Substring matching of patterns like ``2기`` against ``12기`` silently
+executed the wrong count, which the conservative house rules forbid.
+"""
+
+GATHER_RESOURCE_PRIORITY_KEYWORDS: Final[dict[Priority, tuple[str, ...]]] = {
+    "high": _normalize_patterns(("빨리", "급해", "부족", "당장", "quick", "urgent", "need")),
+}
+TRAIN_UNIT_PRIORITY_KEYWORDS: Final[dict[Priority, tuple[str, ...]]] = {
+    "high": _normalize_patterns(
+        ("방어", "압박", "급해", "빨리", "막아", "defense", "pressure", "urgent", "quick"),
+    ),
+}
+SEND_SCOUT_PRIORITY_KEYWORDS: Final[dict[Priority, tuple[str, ...]]] = {
+    "high": _normalize_patterns(
+        ("초반", "빨리", "러시", "압박", "몰래", "확인", "체크", "rush", "quick", "early"),
+    ),
+}
+DEFEND_RAMP_PRIORITY_KEYWORDS: Final[dict[Priority, tuple[str, ...]]] = {
+    "urgent": _normalize_patterns(
+        ("러시", "찌르", "압박", "급해", "빨리", "막아", "rush", "pressure", "urgent", "quick"),
+    ),
+}
+RETREAT_ARMY_PRIORITY_KEYWORDS: Final[dict[Priority, tuple[str, ...]]] = {
+    "urgent": _normalize_patterns(
+        ("압박", "실패", "위험", "빨리", "급해", "살려", "후퇴", "retreat", "danger", "urgent"),
+    ),
+}
+PRESSURE_ENEMY_EXPANSION_PRIORITY_KEYWORDS: Final[dict[Priority, tuple[str, ...]]] = {
+    "high": _normalize_patterns(
+        ("빨리", "강하게", "지금", "압박", "찌르", "pressure", "attack", "hit", "now"),
+    ),
+}
+HARASS_MINERAL_LINE_PRIORITY_KEYWORDS: Final[dict[Priority, tuple[str, ...]]] = {
+    "high": _normalize_patterns(
+        ("빨리", "지금", "강하게", "견제", "흔들", "공격", "harass", "attack", "hit", "now"),
+    ),
+}
+REPAIR_PRIORITY_KEYWORDS: Final[dict[Priority, tuple[str, ...]]] = {
+    "urgent": _normalize_patterns(
+        ("빨리", "당장", "불타", "위험", "urgent", "quick", "burning"),
+    ),
+}
+EXPAND_PRIORITY_KEYWORDS: Final[dict[Priority, tuple[str, ...]]] = {
+    "normal": _normalize_patterns(("안전", "여유", "safe", "when safe")),
+    "high": _normalize_patterns(("빨리", "지금", "당장", "quick", "now")),
+}
 
 
-def _candidate_prevent_supply_block(
-    normalized_command: str,
-) -> ClarificationCandidate | None:
-    if not _looks_like_prevent_supply_block(normalized_command):
-        return None
-    return ClarificationCandidate(
-        alias=PREVENT_SUPPLY_BLOCK_ALIAS,
-        intent="BUILD_STRUCTURE",
-        description="보급 막힘 방지 명령",
-        payload=BuildStructureIntent(
-            priority="high",
-            constraints=(PREVENT_SUPPLY_BLOCK_CONSTRAINT,),
-            structure="Supply Depot",
-            location=PREVENT_SUPPLY_BLOCK_LOCATION,
-        ),
-    )
+def detect_priority(
+    command_text: str,
+    keyword_map: Mapping[Priority, tuple[str, ...]],
+    default: Priority,
+) -> Priority:
+    """Return the first priority whose keyword table matches the command text.
 
+    ``keyword_map`` entries are checked in insertion order and must contain
+    pre-normalized patterns (see ``_normalize_patterns``); ``default`` is
+    returned when no table matches.
+    """
 
-def _candidate_repair(normalized_command: str) -> ClarificationCandidate | None:
-    if not _looks_like_repair(normalized_command):
-        return None
-    return ClarificationCandidate(
-        alias=REPAIR_ALIAS,
-        intent="REPAIR",
-        description="손상된 아군 대상 수리 명령",
-        payload=RepairIntent(
-            priority=_detect_repair_priority(normalized_command),
-            constraints=(REPAIR_CONSTRAINT,),
-            target=_detect_repair_target(normalized_command),
-            worker_count=_detect_count(normalized_command, default=1),
-        ),
-    )
-
-
-def _candidate_build_structure(
-    normalized_command: str,
-) -> ClarificationCandidate | None:
-    build_structure_target = _build_structure_target_from_command(normalized_command)
-    if build_structure_target is None:
-        return None
-    structure, location = build_structure_target
-    priority = "high" if structure in ("Refinery", "Bunker") else "normal"
-    return ClarificationCandidate(
-        alias=BUILD_STRUCTURE_ALIAS,
-        intent="BUILD_STRUCTURE",
-        description="Terran 구조물 건설 명령",
-        payload=BuildStructureIntent(
-            priority=priority,
-            constraints=(BUILD_STRUCTURE_CONSTRAINT,),
-            structure=structure,
-            location=location,
-        ),
-    )
-
-
-def _candidate_train_unit(normalized_command: str) -> ClarificationCandidate | None:
-    if not _looks_like_train_unit(normalized_command):
-        return None
-    return ClarificationCandidate(
-        alias=TRAIN_UNIT_ALIAS,
-        intent="TRAIN_ARMY",
-        description="Marine 생산 명령",
-        payload=TrainArmyIntent(
-            priority=_detect_train_unit_priority(normalized_command),
-            constraints=(TRAIN_UNIT_CONSTRAINT,),
-            unit_type="Marine",
-            count=_detect_train_unit_count(normalized_command),
-        ),
-    )
-
-
-def _candidate_send_scout(normalized_command: str) -> ClarificationCandidate | None:
-    if not _looks_like_send_scout(normalized_command):
-        return None
-    return ClarificationCandidate(
-        alias=SEND_SCOUT_ALIAS,
-        intent="SCOUT",
-        description="적 위치 확인 정찰 명령",
-        payload=ScoutIntent(
-            priority=_detect_send_scout_priority(normalized_command),
-            constraints=(SEND_SCOUT_CONSTRAINT,),
-            target=_detect_send_scout_target(normalized_command),
-            unit_group=_detect_send_scout_unit_group(normalized_command),
-        ),
-    )
-
-
-def _candidate_defend_ramp(normalized_command: str) -> ClarificationCandidate | None:
-    if not _looks_like_defend_ramp(normalized_command):
-        return None
-    return ClarificationCandidate(
-        alias=DEFEND_RAMP_ALIAS,
-        intent="DEFEND",
-        description="입구 방어 명령",
-        payload=DefendIntent(
-            priority=_detect_defend_ramp_priority(normalized_command),
-            constraints=(DEFEND_RAMP_CONSTRAINT,),
-            location=DEFEND_RAMP_LOCATION,
-            unit_group=_detect_defend_ramp_unit_group(normalized_command),
-        ),
-    )
-
-
-def _candidate_retreat_army(normalized_command: str) -> ClarificationCandidate | None:
-    if not _looks_like_retreat_army(normalized_command):
-        return None
-    return ClarificationCandidate(
-        alias=RETREAT_ARMY_ALIAS,
-        intent="DEFEND",
-        description="병력 후퇴 명령",
-        payload=DefendIntent(
-            priority=_detect_retreat_army_priority(normalized_command),
-            constraints=(RETREAT_ARMY_CONSTRAINT,),
-            location=RETREAT_ARMY_LOCATION,
-            unit_group=_detect_retreat_army_unit_group(normalized_command),
-        ),
-    )
-
-
-def _candidate_harass_mineral_line(
-    normalized_command: str,
-) -> ClarificationCandidate | None:
-    if not _looks_like_harass_mineral_line(normalized_command):
-        return None
-    return ClarificationCandidate(
-        alias=HARASS_MINERAL_LINE_ALIAS,
-        intent="HARASS",
-        description="적 미네랄 라인 견제 명령",
-        payload=HarassIntent(
-            priority=_detect_harass_mineral_line_priority(normalized_command),
-            constraints=(HARASS_MINERAL_LINE_CONSTRAINT,),
-            target=HARASS_MINERAL_LINE_TARGET,
-            unit_group=_detect_harass_mineral_line_unit_group(normalized_command),
-        ),
-    )
-
-
-def _candidate_pressure_enemy_expansion(
-    normalized_command: str,
-) -> ClarificationCandidate | None:
-    if not _looks_like_pressure_enemy_expansion(normalized_command):
-        return None
-    return ClarificationCandidate(
-        alias=PRESSURE_ENEMY_EXPANSION_ALIAS,
-        intent="HARASS",
-        description="적 앞마당 압박 명령",
-        payload=HarassIntent(
-            priority=_detect_pressure_enemy_expansion_priority(normalized_command),
-            constraints=(PRESSURE_ENEMY_EXPANSION_CONSTRAINT,),
-            target=PRESSURE_ENEMY_EXPANSION_TARGET,
-            unit_group=_detect_pressure_enemy_expansion_unit_group(normalized_command),
-        ),
-    )
-
-
-def _candidate_expand(normalized_command: str) -> ClarificationCandidate | None:
-    if not _looks_like_expand(normalized_command):
-        return None
-    return ClarificationCandidate(
-        alias=EXPAND_ALIAS,
-        intent="EXPAND",
-        description="앞마당 확장 명령",
-        payload=ExpandIntent(
-            priority=_detect_expand_priority(normalized_command),
-            constraints=(EXPAND_CONSTRAINT,),
-            location=_detect_expand_location(normalized_command),
-        ),
-    )
-
-
-def _candidate_summarize_state(
-    normalized_command: str,
-) -> ClarificationCandidate | None:
-    if not _looks_like_summarize_state(normalized_command):
-        return None
-    return ClarificationCandidate(
-        alias=SUMMARIZE_STATE_ALIAS,
-        intent="SUMMARIZE_STATE",
-        description="현재 상태 요약 명령",
-        payload=SummarizeStateIntent(
-            priority="normal",
-            constraints=(SUMMARIZE_STATE_CONSTRAINT,),
-        ),
-    )
+    normalized_command = _normalize_command_text(command_text)
+    for priority, keywords in keyword_map.items():
+        if _contains_any_pattern(normalized_command, keywords):
+            return priority
+    return default
 
 
 def _looks_like_keep_worker_production(normalized_command: str) -> bool:
-    has_worker_subject = _contains_any_pattern(
-        normalized_command,
-        ("SCV", "에스시비", "일꾼", "worker", "workers"),
+    return (
+        _contains_any_pattern(normalized_command, _WORKER_SUBJECT_PATTERNS)
+        and _contains_any_pattern(normalized_command, _PRODUCTION_CONTINUITY_PATTERNS)
+        and _contains_any_pattern(normalized_command, _WORKER_TRAINING_VERB_PATTERNS)
     )
-    has_production_action = _contains_any_pattern(
-        normalized_command,
-        (
-            "계속",
-            "유지",
-            "쉬지말고",
-            "끊기지않게",
-            "keep",
-            "continuous",
-            "constantly",
-        ),
+
+
+def _looks_like_one_shot_worker_training(normalized_command: str) -> bool:
+    """Worker subject plus a training verb, without continuity words.
+
+    Structure names and marine words bow out so build commands phrased with a
+    worker ("SCV로 벙커 만들어") and army training stay in their own families.
+    """
+
+    return (
+        _contains_any_pattern(normalized_command, _WORKER_SUBJECT_PATTERNS)
+        and _contains_any_pattern(normalized_command, _WORKER_TRAINING_VERB_PATTERNS)
+        and not _contains_any_pattern(normalized_command, _MARINE_UNIT_PATTERNS)
+        and _detect_structure_name(normalized_command) is None
     )
-    has_training_verb = _contains_any_pattern(
-        normalized_command,
-        (
-            "찍어",
-            "뽑아",
-            "생산",
-            "만들",
-            "눌러",
-            "train",
-            "produce",
-            "queue",
-            "make",
-        ),
-    )
-    return has_worker_subject and has_production_action and has_training_verb
 
 
 def _looks_like_gather_resource(normalized_command: str) -> bool:
-    has_worker_subject = _contains_any_pattern(
-        normalized_command,
-        ("SCV", "에스시비", "일꾼", "worker", "workers"),
+    return (
+        _contains_any_pattern(normalized_command, _WORKER_SUBJECT_PATTERNS)
+        and _detect_resource_name(normalized_command) is not None
+        and _contains_any_pattern(normalized_command, _GATHER_ACTION_PATTERNS)
     )
-    has_resource = _detect_resource_name(normalized_command) is not None
-    has_gather_action = _contains_any_pattern(
-        normalized_command,
-        (
-            "붙여",
-            "붙이고",
-            "붙여줘",
-            "채취",
-            "캐",
-            "캐게",
-            "보내",
-            "assign",
-            "gather",
-            "mine",
-            "harvest",
-        ),
-    )
-    return has_worker_subject and has_resource and has_gather_action
 
 
 def _detect_resource_name(normalized_command: str) -> ResourceName | None:
-    if _contains_any_pattern(normalized_command, ("가스", "vespene", "gas")):
+    if _contains_any_pattern(normalized_command, _GAS_RESOURCE_PATTERNS):
         return "gas"
-    if _contains_any_pattern(
-        normalized_command,
-        ("미네랄", "광물", "mineral", "minerals"),
-    ):
+    if _contains_any_pattern(normalized_command, _MINERAL_RESOURCE_PATTERNS):
         return "minerals"
     return None
 
 
-def _detect_gather_resource_priority(
-    normalized_command: str,
-    resource: ResourceName,
-) -> str:
-    if resource == "gas" or _contains_any_pattern(
-        normalized_command,
-        ("빨리", "급해", "부족", "당장", "quick", "urgent", "need"),
-    ):
-        return "high"
-    return "normal"
-
-
 def _detect_worker_base(normalized_command: str) -> str:
-    if _contains_any_pattern(
-        normalized_command,
-        ("앞마당", "내추럴", "natural", "expansion"),
-    ):
+    if _contains_any_pattern(normalized_command, _NATURAL_BASE_PATTERNS):
         return "natural"
     return "main"
 
@@ -1671,45 +1779,15 @@ def _detect_worker_base(normalized_command: str) -> str:
 def _looks_like_prevent_supply_block(normalized_command: str) -> bool:
     has_supply_subject = _contains_any_pattern(
         normalized_command,
-        (
-            "서플",
-            "서플라이",
-            "디포",
-            "보급고",
-            "인구",
-            "supply",
-            "supply depot",
-            "depot",
-        ),
+        _SUPPLY_SUBJECT_PATTERNS,
     )
     has_supply_action = _contains_any_pattern(
         normalized_command,
-        (
-            "막히",
-            "안막히",
-            "트이",
-            "부족",
-            "늘려",
-            "뚫",
-            "미리",
-            "block",
-            "blocked",
-            "cap",
-            "room",
-        ),
+        _SUPPLY_PRESSURE_PATTERNS,
     )
     has_build_verb = _contains_any_pattern(
         normalized_command,
-        (
-            "지어",
-            "올려",
-            "건설",
-            "짓",
-            "확보",
-            "build",
-            "construct",
-            "raise",
-        ),
+        _SUPPLY_BUILD_VERB_PATTERNS,
     )
     return has_supply_subject and (has_supply_action or has_build_verb)
 
@@ -1724,172 +1802,55 @@ def _build_structure_target_from_command(
 
 
 def _detect_structure_name(normalized_command: str) -> StructureName | None:
-    structure_aliases: tuple[tuple[StructureName, tuple[str, ...]], ...] = (
-        (
-            "Supply Depot",
-            ("서플라이디포", "서플라이", "서플", "보급고", "supplydepot", "depot"),
-        ),
-        ("Barracks", ("배럭스", "배럭", "병영", "barracks", "rax")),
-        ("Refinery", ("리파이너리", "정제소", "가스통", "refinery")),
-        ("Bunker", ("벙커", "bunker")),
-        ("Command Center", ("커맨드센터", "커맨드", "commandcenter", "commandcentre", "cc")),
-    )
-    for structure, aliases in structure_aliases:
-        if any(alias in normalized_command for alias in aliases):
+    for structure, aliases in _STRUCTURE_NAME_ALIASES:
+        if _contains_any_pattern(normalized_command, aliases):
             return structure
     return None
 
 
 def _has_build_structure_verb(normalized_command: str) -> bool:
-    return _contains_any_pattern(
-        normalized_command,
-        (
-            "지어",
-            "지어서",
-            "짓",
-            "올려",
-            "건설",
-            "만들",
-            "build",
-            "construct",
-            "make",
-            "raise",
-        ),
-    )
+    return _contains_any_pattern(normalized_command, _BUILD_STRUCTURE_VERB_PATTERNS)
 
 
 def _detect_structure_location(
     normalized_command: str,
     structure: StructureName,
 ) -> str:
-    if _contains_any_pattern(normalized_command, ("앞마당", "natural")) and any(
-        token in normalized_command for token in ("입구", "언덕", "초크", "쪽", "choke")
-    ):
+    if _contains_any_pattern(
+        normalized_command, _NATURAL_LOCATION_PATTERNS
+    ) and _contains_any_pattern(normalized_command, _CHOKE_HINT_PATTERNS):
         return "natural choke"
-    if _contains_any_pattern(normalized_command, ("입구", "언덕", "램프", "ramp")):
+    if _contains_any_pattern(normalized_command, _RAMP_LOCATION_PATTERNS):
         return "main ramp"
-    if _contains_any_pattern(normalized_command, ("가스", "geyser")):
+    if _contains_any_pattern(normalized_command, _GEYSER_LOCATION_PATTERNS):
         return "main geyser"
-    if _contains_any_pattern(normalized_command, ("앞마당", "멀티", "확장", "natural", "expansion")):
+    if _contains_any_pattern(normalized_command, _EXPANSION_LOCATION_PATTERNS):
         return "natural expansion"
-    if _contains_any_pattern(normalized_command, ("본진", "main base", "base")):
+    if _contains_any_pattern(normalized_command, _MAIN_BASE_LOCATION_PATTERNS):
         return "main base"
     return BUILD_STRUCTURE_DEFAULT_LOCATIONS[structure]
 
 
 def _looks_like_train_unit(normalized_command: str) -> bool:
-    has_supported_unit = _contains_any_pattern(
-        normalized_command,
-        (
-            "마린",
-            "해병",
-            "marine",
-            "marines",
-        ),
-    )
-    has_training_verb = _contains_any_pattern(
-        normalized_command,
-        (
-            "찍어",
-            "뽑아",
-            "생산",
-            "만들",
-            "추가",
-            "눌러",
-            "뽑",
-            "train",
-            "produce",
-            "queue",
-            "make",
-        ),
-    )
-    return has_supported_unit and has_training_verb
-
-
-def _detect_train_unit_priority(normalized_command: str) -> str:
-    if _contains_any_pattern(
-        normalized_command,
-        (
-            "방어",
-            "압박",
-            "급해",
-            "빨리",
-            "막아",
-            "defense",
-            "pressure",
-            "urgent",
-            "quick",
-        ),
-    ):
-        return "high"
-    return "normal"
-
-
-def _detect_train_unit_count(normalized_command: str) -> int:
-    return _detect_count(normalized_command, default=1)
+    return _contains_any_pattern(
+        normalized_command, _MARINE_UNIT_PATTERNS
+    ) and _contains_any_pattern(normalized_command, _ARMY_TRAINING_VERB_PATTERNS)
 
 
 def _looks_like_send_scout(normalized_command: str) -> bool:
-    has_scout_action = _contains_any_pattern(
-        normalized_command,
-        (
-            "정찰",
-            "확인",
-            "체크",
-            "봐",
-            "보러",
-            "살펴",
-            "scout",
-            "check",
-            "send",
-        ),
-    )
-    has_target_context = _contains_any_pattern(
-        normalized_command,
-        (
-            "적",
-            "상대",
-            "enemy",
-            "앞마당",
-            "본진",
-            "입구",
-            "미네랄",
-            "natural",
-            "front",
-            "main",
-        ),
-    )
-    return has_scout_action and has_target_context
-
-
-def _detect_send_scout_priority(normalized_command: str) -> str:
-    if _contains_any_pattern(
-        normalized_command,
-        (
-            "초반",
-            "빨리",
-            "러시",
-            "압박",
-            "몰래",
-            "확인",
-            "체크",
-            "rush",
-            "quick",
-            "early",
-        ),
-    ):
-        return "high"
-    return "normal"
+    return _contains_any_pattern(
+        normalized_command, _SCOUT_ACTION_PATTERNS
+    ) and _contains_any_pattern(normalized_command, _SCOUT_TARGET_CONTEXT_PATTERNS)
 
 
 def _detect_send_scout_target(normalized_command: str) -> str:
-    if _contains_any_pattern(normalized_command, ("미네랄", "mineral", "mineral line")):
+    if _contains_any_pattern(normalized_command, _SCOUT_MINERAL_TARGET_PATTERNS):
         return "enemy mineral line"
-    if _contains_any_pattern(normalized_command, ("앞마당", "내추럴", "natural")):
+    if _contains_any_pattern(normalized_command, _SCOUT_NATURAL_TARGET_PATTERNS):
         return "enemy natural"
-    if _contains_any_pattern(normalized_command, ("본진", "main", "main base")):
+    if _contains_any_pattern(normalized_command, _SCOUT_MAIN_TARGET_PATTERNS):
         return "enemy main"
-    if _contains_any_pattern(normalized_command, ("입구", "front", "초크")):
+    if _contains_any_pattern(normalized_command, _SCOUT_FRONT_TARGET_PATTERNS):
         return "enemy front"
     return SEND_SCOUT_DEFAULT_TARGET
 
@@ -1902,117 +1863,35 @@ def _detect_send_scout_unit_group(normalized_command: str) -> str:
 
 
 def _looks_like_defend_ramp(normalized_command: str) -> bool:
-    has_ramp_location = _contains_any_pattern(
-        normalized_command,
-        (
-            "입구",
-            "램프",
-            "언덕",
-            "ramp",
-            "choke",
-        ),
-    )
-    has_defense_action = _contains_any_pattern(
-        normalized_command,
-        (
-            "막아",
-            "막고",
-            "막게",
-            "수비",
-            "방어",
-            "지켜",
-            "세워",
-            "홀드",
-            "hold",
-            "defend",
-            "guard",
-            "move",
-            "rally",
-        ),
-    )
-    return has_ramp_location and has_defense_action
-
-
-def _detect_defend_ramp_priority(normalized_command: str) -> str:
     if _contains_any_pattern(
-        normalized_command,
-        (
-            "러시",
-            "찌르",
-            "압박",
-            "급해",
-            "빨리",
-            "막아",
-            "rush",
-            "pressure",
-            "urgent",
-            "quick",
-        ),
+        normalized_command, _SCOUT_EXCLUSIVE_ACTION_PATTERNS
+    ) and not _contains_any_pattern(
+        normalized_command, _DEFENSE_EXCLUSIVE_ACTION_PATTERNS
     ):
-        return "urgent"
-    return "high"
+        # Explicit scout vocabulary wins: "적 입구 정찰 보내" is a scout
+        # order, not a ramp defense, even though it names a ramp word.
+        # Commands naming both vocabularies stay ambiguous.
+        return False
+    return _contains_any_pattern(
+        normalized_command, _RAMP_DEFENSE_LOCATION_PATTERNS
+    ) and _contains_any_pattern(normalized_command, _RAMP_DEFENSE_ACTION_PATTERNS)
 
 
 def _detect_defend_ramp_unit_group(normalized_command: str) -> str:
-    if _contains_any_pattern(normalized_command, ("마린", "해병", "marine", "marines")):
-        return "Marines"
+    marine_count = _detect_marine_count(normalized_command)
+    if marine_count is not None:
+        return _format_unit_group(marine_count, "Marine")
     return DEFEND_RAMP_UNIT_GROUP
 
 
 def _looks_like_retreat_army(normalized_command: str) -> bool:
-    has_army_subject = _contains_any_pattern(
-        normalized_command,
-        (
-            "병력",
-            "마린",
-            "해병",
-            "marine",
-            "marines",
-            "army",
-        ),
-    )
-    has_retreat_action = _contains_any_pattern(
-        normalized_command,
-        (
-            "뒤로",
-            "후퇴",
-            "빠져",
-            "빼",
-            "빼고",
-            "살려",
-            "회군",
-            "pullback",
-            "pull back",
-            "fallback",
-            "fall back",
-            "retreat",
-        ),
-    )
-    return has_army_subject and has_retreat_action
-
-
-def _detect_retreat_army_priority(normalized_command: str) -> str:
-    if _contains_any_pattern(
-        normalized_command,
-        (
-            "압박",
-            "실패",
-            "위험",
-            "빨리",
-            "급해",
-            "살려",
-            "후퇴",
-            "retreat",
-            "danger",
-            "urgent",
-        ),
-    ):
-        return "urgent"
-    return "high"
+    return _contains_any_pattern(
+        normalized_command, _ARMY_SUBJECT_PATTERNS
+    ) and _contains_any_pattern(normalized_command, _RETREAT_ACTION_PATTERNS)
 
 
 def _detect_retreat_army_unit_group(normalized_command: str) -> str:
-    if _contains_any_pattern(normalized_command, ("마린", "해병", "marine", "marines")):
+    if _contains_any_pattern(normalized_command, _MARINE_UNIT_PATTERNS):
         return "Marines"
     return RETREAT_ARMY_UNIT_GROUP
 
@@ -2020,64 +1899,15 @@ def _detect_retreat_army_unit_group(normalized_command: str) -> str:
 def _looks_like_pressure_enemy_expansion(normalized_command: str) -> bool:
     has_enemy_expansion_target = _contains_any_pattern(
         normalized_command,
-        (
-            "상대앞마당",
-            "적앞마당",
-            "적내추럴",
-            "상대내추럴",
-            "상대멀티",
-            "적멀티",
-            "enemynatural",
-            "enemy natural",
-            "enemyexpansion",
-            "enemy expansion",
-            "enemyexpo",
-        ),
+        _ENEMY_EXPANSION_TARGET_PATTERNS,
     ) or (
-        _contains_any_pattern(
-            normalized_command,
-            ("앞마당", "내추럴", "멀티", "확장", "natural", "expansion"),
-        )
-        and _contains_any_pattern(normalized_command, ("상대", "적", "enemy"))
+        _contains_any_pattern(normalized_command, _PRESSURE_EXPANSION_WORD_PATTERNS)
+        and _contains_any_pattern(normalized_command, _ENEMY_OWNER_PATTERNS)
     )
-    has_pressure_action = _contains_any_pattern(
+    return has_enemy_expansion_target and _contains_any_pattern(
         normalized_command,
-        (
-            "압박",
-            "견제",
-            "방해",
-            "흔들",
-            "찌르",
-            "괴롭",
-            "공격",
-            "pressure",
-            "harass",
-            "deny",
-            "attack",
-            "hit",
-            "strike",
-        ),
+        _PRESSURE_ACTION_PATTERNS,
     )
-    return has_enemy_expansion_target and has_pressure_action
-
-
-def _detect_pressure_enemy_expansion_priority(normalized_command: str) -> str:
-    if _contains_any_pattern(
-        normalized_command,
-        (
-            "빨리",
-            "강하게",
-            "지금",
-            "압박",
-            "찌르",
-            "pressure",
-            "attack",
-            "hit",
-            "now",
-        ),
-    ):
-        return "high"
-    return "normal"
 
 
 def _detect_pressure_enemy_expansion_unit_group(normalized_command: str) -> str:
@@ -2090,59 +1920,16 @@ def _detect_pressure_enemy_expansion_unit_group(normalized_command: str) -> str:
 def _looks_like_harass_mineral_line(normalized_command: str) -> bool:
     has_mineral_line_target = _contains_any_pattern(
         normalized_command,
-        (
-            "미네랄라인",
-            "일꾼라인",
-            "상대미네랄",
-            "적미네랄",
-            "mineralline",
-            "mineral line",
-            "enemyminerals",
-            "enemy minerals",
-        ),
+        _MINERAL_LINE_TARGET_PATTERNS,
     ) or (
-        _contains_any_pattern(normalized_command, ("일꾼", "worker", "workers"))
-        and _contains_any_pattern(normalized_command, ("채취", "캐", "라인", "line"))
-        and _contains_any_pattern(normalized_command, ("상대", "적", "enemy"))
+        _contains_any_pattern(normalized_command, _WORKER_WORD_PATTERNS)
+        and _contains_any_pattern(normalized_command, _GATHER_LINE_PATTERNS)
+        and _contains_any_pattern(normalized_command, _ENEMY_OWNER_PATTERNS)
     )
-    has_harass_action = _contains_any_pattern(
+    return has_mineral_line_target and _contains_any_pattern(
         normalized_command,
-        (
-            "견제",
-            "흔들",
-            "괴롭",
-            "방해",
-            "찌르",
-            "공격",
-            "harass",
-            "disrupt",
-            "deny",
-            "attack",
-            "hit",
-            "raid",
-        ),
+        _HARASS_ACTION_PATTERNS,
     )
-    return has_mineral_line_target and has_harass_action
-
-
-def _detect_harass_mineral_line_priority(normalized_command: str) -> str:
-    if _contains_any_pattern(
-        normalized_command,
-        (
-            "빨리",
-            "지금",
-            "강하게",
-            "견제",
-            "흔들",
-            "공격",
-            "harass",
-            "attack",
-            "hit",
-            "now",
-        ),
-    ):
-        return "high"
-    return "normal"
 
 
 def _detect_harass_mineral_line_unit_group(normalized_command: str) -> str:
@@ -2153,190 +1940,63 @@ def _detect_harass_mineral_line_unit_group(normalized_command: str) -> str:
 
 
 def _looks_like_repair(normalized_command: str) -> bool:
-    has_target = _contains_any_pattern(
-        normalized_command,
-        (
-            "벙커",
-            "배럭",
-            "병영",
-            "서플",
-            "보급고",
-            "커맨드",
-            "bunker",
-            "barracks",
-            "depot",
-            "commandcenter",
-            "command center",
-        ),
-    )
-    has_repair_action = _contains_any_pattern(
-        normalized_command,
-        (
-            "수리",
-            "고쳐",
-            "고치",
-            "복구",
-            "repair",
-            "fix",
-            "restore",
-        ),
-    )
-    return has_target and has_repair_action
-
-
-def _detect_repair_priority(normalized_command: str) -> str:
-    if _contains_any_pattern(
-        normalized_command,
-        ("빨리", "당장", "불타", "위험", "urgent", "quick", "burning"),
-    ):
-        return "urgent"
-    return "high"
+    return _contains_any_pattern(
+        normalized_command, _REPAIR_TARGET_PATTERNS
+    ) and _contains_any_pattern(normalized_command, _REPAIR_ACTION_PATTERNS)
 
 
 def _detect_repair_target(normalized_command: str) -> str:
-    if _contains_any_pattern(normalized_command, ("벙커", "bunker")):
+    if _contains_any_pattern(normalized_command, _REPAIR_BUNKER_PATTERNS):
         return "front bunker"
-    if _contains_any_pattern(normalized_command, ("배럭", "병영", "barracks")):
+    if _contains_any_pattern(normalized_command, _REPAIR_BARRACKS_PATTERNS):
         return "Barracks"
-    if _contains_any_pattern(normalized_command, ("서플", "보급고", "depot")):
+    if _contains_any_pattern(normalized_command, _REPAIR_DEPOT_PATTERNS):
         return "Supply Depot"
-    if _contains_any_pattern(
-        normalized_command,
-        ("커맨드센터", "커맨드", "commandcenter", "command center"),
-    ):
+    if _contains_any_pattern(normalized_command, _REPAIR_COMMAND_CENTER_PATTERNS):
         return "Command Center"
     return "front bunker"
 
 
 def _looks_like_expand(normalized_command: str) -> bool:
-    if _contains_any_pattern(normalized_command, ("적", "상대", "enemy")) and (
+    if _contains_any_pattern(normalized_command, _ENEMY_OWNER_PATTERNS) and (
         _looks_like_pressure_enemy_expansion(normalized_command)
         or _looks_like_harass_mineral_line(normalized_command)
     ):
         return False
 
-    has_expansion_location = _contains_any_pattern(
-        normalized_command,
-        ("앞마당", "내추럴", "멀티", "확장", "natural", "expansion", "expo"),
-    )
-    has_expand_action = _contains_any_pattern(
-        normalized_command,
-        (
-            "가져",
-            "먹어",
-            "먹자",
-            "펴",
-            "확장",
-            "멀티",
-            "준비",
-            "커맨드센터",
-            "커맨드",
-            "expand",
-            "take",
-            "secure",
-            "prepare",
-            "commandcenter",
-            "command center",
-            "cc",
-        ),
-    )
-    return has_expansion_location and has_expand_action
-
-
-def _detect_expand_priority(normalized_command: str) -> str:
-    if _contains_any_pattern(
-        normalized_command,
-        ("안전", "여유", "safe", "when safe"),
-    ):
-        return "normal"
-    if _contains_any_pattern(
-        normalized_command,
-        ("빨리", "지금", "당장", "quick", "now"),
-    ):
-        return "high"
-    return "normal"
-
-
-def _detect_expand_location(normalized_command: str) -> str:
-    if _contains_any_pattern(
-        normalized_command,
-        ("앞마당", "내추럴", "natural", "expansion", "expo"),
-    ):
-        return "natural expansion"
-    return "natural expansion"
+    return _contains_any_pattern(
+        normalized_command, _EXPAND_LOCATION_PATTERNS
+    ) and _contains_any_pattern(normalized_command, _EXPAND_ACTION_PATTERNS)
 
 
 def _looks_like_summarize_state(normalized_command: str) -> bool:
-    has_state_subject = any(
-        token in normalized_command
-        for token in (
-            "상태",
-            "상황",
-            "현황",
-            "브리핑",
-            "요약",
-            "status",
-            "state",
-            "summary",
-        )
+    has_state_subject = _contains_any_pattern(
+        normalized_command,
+        _STATE_SUBJECT_PATTERNS,
     )
-    has_summary_action = any(
-        token in normalized_command
-        for token in (
-            "알려",
-            "보여",
-            "요약",
-            "브리핑",
-            "정리",
-            "보고",
-            "show",
-            "summarize",
-            "brief",
-            "report",
-        )
+    has_summary_action = _contains_any_pattern(
+        normalized_command,
+        _SUMMARY_ACTION_PATTERNS,
     )
-    asks_current_activity = any(
-        token in normalized_command
-        for token in (
-            "뭐하고",
-            "어떻게되고",
-            "무슨일",
-            "whatsgoingon",
-            "whatshappening",
-        )
+    asks_current_activity = _contains_any_pattern(
+        normalized_command,
+        _CURRENT_ACTIVITY_PATTERNS,
     )
     return (has_state_subject and has_summary_action) or asks_current_activity
 
 
-def _normalize_command_text(command_text: str) -> str:
-    if not isinstance(command_text, str):
-        return ""
-    return "".join(command_text.casefold().split())
-
-
-def _contains_any_pattern(normalized_command: str, patterns: tuple[str, ...]) -> bool:
-    return any(_normalize_command_text(pattern) in normalized_command for pattern in patterns)
-
-
 def _detect_count(normalized_command: str, *, default: int) -> int:
-    count_aliases: tuple[tuple[int, tuple[str, ...]], ...] = (
-        (8, ("여덟기", "8기", "여덟", "eight")),
-        (7, ("일곱기", "7기", "일곱", "seven")),
-        (6, ("여섯기", "6기", "여섯", "six")),
-        (5, ("다섯기", "5기", "다섯", "five")),
-        (4, ("네기", "4기", "넷", "네마리", "four")),
-        (3, ("세기", "3기", "셋", "세마리", "three")),
-        (2, ("두기", "2기", "둘", "두마리", "two")),
-        (1, ("한기", "1기", "하나", "한마리", "하나씩", "one")),
-    )
-    for count, aliases in count_aliases:
-        if any(alias in normalized_command for alias in aliases):
+    digit_match = _DIGIT_COUNT_PATTERN.search(normalized_command)
+    if digit_match is not None:
+        return int(digit_match.group(1))
+    for count, aliases in _COUNT_KEYWORDS:
+        if _contains_any_pattern(normalized_command, aliases):
             return count
     return default
 
 
 def _detect_marine_count(normalized_command: str) -> int | None:
-    if not _contains_any_pattern(normalized_command, ("마린", "해병", "marine", "marines")):
+    if not _contains_any_pattern(normalized_command, _MARINE_UNIT_PATTERNS):
         return None
     return _detect_count(normalized_command, default=0)
 
@@ -2347,3 +2007,303 @@ def _format_unit_group(count: int, unit_name: str) -> str:
     if count == 1:
         return f"1 {unit_name}"
     return f"{count} {unit_name}s"
+
+
+def _gather_resource_payload(normalized_command: str) -> IntentPayload | None:
+    """Build the GATHER_RESOURCE payload when the command matches the family."""
+
+    if not _looks_like_gather_resource(normalized_command):
+        return None
+    resource = _detect_resource_name(normalized_command)
+    if resource is None:
+        return None
+    priority: Priority = (
+        "high"
+        if resource == "gas"
+        else detect_priority(normalized_command, GATHER_RESOURCE_PRIORITY_KEYWORDS, "normal")
+    )
+    return GatherResourceIntent(
+        priority=priority,
+        constraints=(GATHER_RESOURCE_CONSTRAINT,),
+        resource=resource,
+        worker_count=_detect_count(normalized_command, default=3),
+        base=_detect_worker_base(normalized_command),
+    )
+
+
+def _keep_worker_production_payload(normalized_command: str) -> IntentPayload | None:
+    """Build the TRAIN_WORKER payload when the command matches the family.
+
+    Continuity phrasing ("SCV 계속 찍어") keeps the continuous-production
+    constraint; one-shot phrasing ("일꾼 뽑아", "SCV 두 기 찍어") trains the
+    requested count exactly once without pretending continuity.
+    """
+
+    if _looks_like_keep_worker_production(normalized_command):
+        return TrainWorkerIntent(
+            priority="normal",
+            constraints=(KEEP_WORKER_PRODUCTION_CONSTRAINT,),
+            count=1,
+        )
+    if _looks_like_one_shot_worker_training(normalized_command):
+        return TrainWorkerIntent(
+            priority="normal",
+            constraints=(TRAIN_WORKER_ONESHOT_CONSTRAINT,),
+            count=_detect_count(normalized_command, default=1),
+        )
+    return None
+
+
+def _prevent_supply_block_payload(normalized_command: str) -> IntentPayload | None:
+    """Build the supply-block BUILD_STRUCTURE payload when the family matches."""
+
+    if not _looks_like_prevent_supply_block(normalized_command):
+        return None
+    return BuildStructureIntent(
+        priority="high",
+        constraints=(PREVENT_SUPPLY_BLOCK_CONSTRAINT,),
+        structure="Supply Depot",
+        location=PREVENT_SUPPLY_BLOCK_LOCATION,
+    )
+
+
+def _repair_payload(normalized_command: str) -> IntentPayload | None:
+    """Build the REPAIR payload when the command matches the family."""
+
+    if not _looks_like_repair(normalized_command):
+        return None
+    return RepairIntent(
+        priority=detect_priority(normalized_command, REPAIR_PRIORITY_KEYWORDS, "high"),
+        constraints=(REPAIR_CONSTRAINT,),
+        target=_detect_repair_target(normalized_command),
+        worker_count=_detect_count(normalized_command, default=1),
+    )
+
+
+def _build_structure_payload(normalized_command: str) -> IntentPayload | None:
+    """Build the BUILD_STRUCTURE payload when the command matches the family."""
+
+    build_structure_target = _build_structure_target_from_command(normalized_command)
+    if build_structure_target is None:
+        return None
+    structure, location = build_structure_target
+    priority = "high" if structure in ("Refinery", "Bunker") else "normal"
+    return BuildStructureIntent(
+        priority=priority,
+        constraints=(BUILD_STRUCTURE_CONSTRAINT,),
+        structure=structure,
+        location=location,
+    )
+
+
+def _train_unit_payload(normalized_command: str) -> IntentPayload | None:
+    """Build the TRAIN_ARMY payload when the command matches the family."""
+
+    if not _looks_like_train_unit(normalized_command):
+        return None
+    return TrainArmyIntent(
+        priority=detect_priority(normalized_command, TRAIN_UNIT_PRIORITY_KEYWORDS, "normal"),
+        constraints=(TRAIN_UNIT_CONSTRAINT,),
+        unit_type="Marine",
+        count=_detect_count(normalized_command, default=1),
+    )
+
+
+def _send_scout_payload(normalized_command: str) -> IntentPayload | None:
+    """Build the SCOUT payload when the command matches the family."""
+
+    if not _looks_like_send_scout(normalized_command):
+        return None
+    return ScoutIntent(
+        priority=detect_priority(normalized_command, SEND_SCOUT_PRIORITY_KEYWORDS, "normal"),
+        constraints=(SEND_SCOUT_CONSTRAINT,),
+        target=_detect_send_scout_target(normalized_command),
+        unit_group=_detect_send_scout_unit_group(normalized_command),
+    )
+
+
+def _defend_ramp_payload(normalized_command: str) -> IntentPayload | None:
+    """Build the ramp DEFEND payload when the command matches the family."""
+
+    if not _looks_like_defend_ramp(normalized_command):
+        return None
+    return DefendIntent(
+        priority=detect_priority(normalized_command, DEFEND_RAMP_PRIORITY_KEYWORDS, "high"),
+        constraints=(DEFEND_RAMP_CONSTRAINT,),
+        location=DEFEND_RAMP_LOCATION,
+        unit_group=_detect_defend_ramp_unit_group(normalized_command),
+    )
+
+
+def _retreat_army_payload(normalized_command: str) -> IntentPayload | None:
+    """Build the retreat DEFEND payload when the command matches the family."""
+
+    if not _looks_like_retreat_army(normalized_command):
+        return None
+    return DefendIntent(
+        priority=detect_priority(normalized_command, RETREAT_ARMY_PRIORITY_KEYWORDS, "high"),
+        constraints=(RETREAT_ARMY_CONSTRAINT,),
+        location=RETREAT_ARMY_LOCATION,
+        unit_group=_detect_retreat_army_unit_group(normalized_command),
+    )
+
+
+def _harass_mineral_line_payload(normalized_command: str) -> IntentPayload | None:
+    """Build the mineral-line HARASS payload when the family matches."""
+
+    if not _looks_like_harass_mineral_line(normalized_command):
+        return None
+    return HarassIntent(
+        priority=detect_priority(
+            normalized_command,
+            HARASS_MINERAL_LINE_PRIORITY_KEYWORDS,
+            "normal",
+        ),
+        constraints=(HARASS_MINERAL_LINE_CONSTRAINT,),
+        target=HARASS_MINERAL_LINE_TARGET,
+        unit_group=_detect_harass_mineral_line_unit_group(normalized_command),
+    )
+
+
+def _pressure_enemy_expansion_payload(normalized_command: str) -> IntentPayload | None:
+    """Build the enemy-expansion HARASS payload when the family matches."""
+
+    if not _looks_like_pressure_enemy_expansion(normalized_command):
+        return None
+    return HarassIntent(
+        priority=detect_priority(
+            normalized_command,
+            PRESSURE_ENEMY_EXPANSION_PRIORITY_KEYWORDS,
+            "normal",
+        ),
+        constraints=(PRESSURE_ENEMY_EXPANSION_CONSTRAINT,),
+        target=PRESSURE_ENEMY_EXPANSION_TARGET,
+        unit_group=_detect_pressure_enemy_expansion_unit_group(normalized_command),
+    )
+
+
+def _expand_payload(normalized_command: str) -> IntentPayload | None:
+    """Build the EXPAND payload when the command matches the family."""
+
+    if not _looks_like_expand(normalized_command):
+        return None
+    return ExpandIntent(
+        priority=detect_priority(normalized_command, EXPAND_PRIORITY_KEYWORDS, "normal"),
+        constraints=(EXPAND_CONSTRAINT,),
+        location=EXPAND_DEFAULT_LOCATION,
+    )
+
+
+def _summarize_state_payload(normalized_command: str) -> IntentPayload | None:
+    """Build the SUMMARIZE_STATE payload when the command matches the family."""
+
+    if not _looks_like_summarize_state(normalized_command):
+        return None
+    return SummarizeStateIntent(
+        priority="normal",
+        constraints=(SUMMARIZE_STATE_CONSTRAINT,),
+    )
+
+
+@dataclass(frozen=True)
+class IntentCandidateSpec:
+    """One supported intent family: payload builder plus clarification labels."""
+
+    alias: str
+    intent: IntentName
+    description: str
+    build_payload: Callable[[str], IntentPayload | None]
+
+    def __post_init__(self) -> None:
+        if not self.alias.strip():
+            raise ValueError("intent candidate spec alias must be non-empty.")
+        if not self.description.strip():
+            raise ValueError("intent candidate spec description must be non-empty.")
+
+
+INTENT_CANDIDATE_SPECS: Final[tuple[IntentCandidateSpec, ...]] = (
+    IntentCandidateSpec(
+        alias=GATHER_RESOURCE_ALIAS,
+        intent="GATHER_RESOURCE",
+        description="자원 채취 명령",
+        build_payload=_gather_resource_payload,
+    ),
+    IntentCandidateSpec(
+        alias=KEEP_WORKER_PRODUCTION_ALIAS,
+        intent="TRAIN_WORKER",
+        description="SCV 생산 유지 명령",
+        build_payload=_keep_worker_production_payload,
+    ),
+    IntentCandidateSpec(
+        alias=PREVENT_SUPPLY_BLOCK_ALIAS,
+        intent="BUILD_STRUCTURE",
+        description="보급 막힘 방지 명령",
+        build_payload=_prevent_supply_block_payload,
+    ),
+    IntentCandidateSpec(
+        alias=REPAIR_ALIAS,
+        intent="REPAIR",
+        description="손상된 아군 대상 수리 명령",
+        build_payload=_repair_payload,
+    ),
+    IntentCandidateSpec(
+        alias=BUILD_STRUCTURE_ALIAS,
+        intent="BUILD_STRUCTURE",
+        description="Terran 구조물 건설 명령",
+        build_payload=_build_structure_payload,
+    ),
+    IntentCandidateSpec(
+        alias=TRAIN_UNIT_ALIAS,
+        intent="TRAIN_ARMY",
+        description="Marine 생산 명령",
+        build_payload=_train_unit_payload,
+    ),
+    IntentCandidateSpec(
+        alias=SEND_SCOUT_ALIAS,
+        intent="SCOUT",
+        description="적 위치 확인 정찰 명령",
+        build_payload=_send_scout_payload,
+    ),
+    IntentCandidateSpec(
+        alias=DEFEND_RAMP_ALIAS,
+        intent="DEFEND",
+        description="입구 방어 명령",
+        build_payload=_defend_ramp_payload,
+    ),
+    IntentCandidateSpec(
+        alias=RETREAT_ARMY_ALIAS,
+        intent="DEFEND",
+        description="병력 후퇴 명령",
+        build_payload=_retreat_army_payload,
+    ),
+    IntentCandidateSpec(
+        alias=HARASS_MINERAL_LINE_ALIAS,
+        intent="HARASS",
+        description="적 미네랄 라인 견제 명령",
+        build_payload=_harass_mineral_line_payload,
+    ),
+    IntentCandidateSpec(
+        alias=PRESSURE_ENEMY_EXPANSION_ALIAS,
+        intent="HARASS",
+        description="적 앞마당 압박 명령",
+        build_payload=_pressure_enemy_expansion_payload,
+    ),
+    IntentCandidateSpec(
+        alias=EXPAND_ALIAS,
+        intent="EXPAND",
+        description="앞마당 확장 명령",
+        build_payload=_expand_payload,
+    ),
+    IntentCandidateSpec(
+        alias=SUMMARIZE_STATE_ALIAS,
+        intent="SUMMARIZE_STATE",
+        description="현재 상태 요약 명령",
+        build_payload=_summarize_state_payload,
+    ),
+)
+"""Ordered intent-family registry shared by resolution and clarification.
+
+The order reproduces the legacy if-chain precedence (which matched the legacy
+candidate registration order exactly) and drives the candidate order shown in
+ambiguous-command clarification prompts and failure metadata.
+"""

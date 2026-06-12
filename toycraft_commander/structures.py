@@ -6,6 +6,8 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from typing import Final, Literal
 
+from toycraft_commander.aliases import resolve_aliased_name
+
 
 StructureName = Literal["Barracks", "Factory", "Supply Depot", "Refinery"]
 BuildingName = StructureName
@@ -197,15 +199,7 @@ def get_building_model(name: BuildingName) -> StructureModel:
 def resolve_structure_name(value: object) -> StructureName | None:
     """Return a canonical structure name for exact, English, or Korean input."""
 
-    if type(value) is not str:
-        return None
-    candidate = value.strip()
-    if candidate in STRUCTURE_MODEL_BY_NAME:
-        return candidate
-    normalized_candidate = candidate.lower()
-    return STRUCTURE_NAME_ALIASES.get(normalized_candidate) or STRUCTURE_NAME_ALIASES.get(
-        "".join(normalized_candidate.split())
-    )
+    return resolve_aliased_name(value, STRUCTURE_MODEL_BY_NAME, STRUCTURE_NAME_ALIASES)
 
 
 def resolve_building_name(value: object) -> BuildingName | None:

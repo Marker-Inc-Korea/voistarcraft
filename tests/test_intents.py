@@ -1,6 +1,8 @@
 import json
 import unittest
+from enum import auto
 
+from toycraft_commander.compat import StrEnum
 from toycraft_commander.intents import (
     CANONICAL_INTENT_ENUM_VALUES,
     CANONICAL_INTENT_NAMES,
@@ -218,6 +220,48 @@ def validator_rejected_payloads_by_intent():
         rejected_payloads.setdefault(intent_name, []).append(payload)
 
     return rejected_payloads
+
+
+class CompatStrEnumTest(unittest.TestCase):
+    """Guard the Python 3.10 StrEnum fallback against stdlib 3.11+ divergence."""
+
+    INTENT_STR_ENUM_TYPES = (
+        CanonicalIntentName,
+        PriorityLevel,
+        IntentFieldType,
+        ValidationStatus,
+        EntityReferenceKind,
+        EntityOwner,
+        IntentCommandResultStatus,
+        FeasibilityErrorReason,
+    )
+
+    def test_str_enum_members_stringify_to_their_values(self) -> None:
+        for enum_type in self.INTENT_STR_ENUM_TYPES:
+            for member in enum_type:
+                with self.subTest(enum=enum_type.__name__, member=member.name):
+                    self.assertEqual(member.value, str(member))
+                    self.assertEqual(member.value, f"{member}")
+                    self.assertEqual(member.value, "{}".format(member))
+                    self.assertEqual(member.value, format(member))
+
+    def test_str_enum_members_are_plain_string_equal_and_json_ready(self) -> None:
+        self.assertEqual("SCOUT", CanonicalIntentName.SCOUT)
+        self.assertEqual("urgent", PriorityLevel.URGENT)
+        self.assertEqual(
+            '"executable"',
+            json.dumps(str(ValidationStatus.EXECUTABLE)),
+        )
+
+    def test_str_enum_auto_values_lowercase_member_names(self) -> None:
+        class SampleStrEnum(StrEnum):
+            FIRST = auto()
+            SECOND_VALUE = auto()
+
+        self.assertEqual("first", SampleStrEnum.FIRST.value)
+        self.assertEqual("second_value", SampleStrEnum.SECOND_VALUE.value)
+        self.assertEqual("first", str(SampleStrEnum.FIRST))
+        self.assertEqual("second_value", f"{SampleStrEnum.SECOND_VALUE}")
 
 
 class CanonicalIntentInventoryTest(unittest.TestCase):

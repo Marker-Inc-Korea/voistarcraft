@@ -1016,15 +1016,6 @@ INTENT_DSL_FIELD_ORDER_BY_INTENT: Final[dict[IntentName, tuple[str, ...]]] = {
 """Canonical v1 field order for each typed Intent DSL payload."""
 
 
-def get_canonical_intent(name: IntentName) -> CanonicalIntent:
-    """Return the canonical intent definition by name."""
-
-    for intent in CANONICAL_INTENTS:
-        if intent.name == name:
-            return intent
-    raise KeyError(f"Unsupported canonical intent: {name}")
-
-
 def get_intent_schema(name: IntentName) -> IntentSchema:
     """Return the minimal required DSL schema for a canonical intent."""
 

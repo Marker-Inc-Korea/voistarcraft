@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Final, Literal
 
+from toycraft_commander.aliases import resolve_aliased_name
+
 
 UnitName = Literal["SCV", "Marine", "Vulture", "Zealot"]
 FactionName = Literal["Terran", "Protoss"]
@@ -224,14 +226,9 @@ def get_unit_model(name: UnitName) -> UnitModel:
 
 
 def resolve_unit_name(value: object) -> UnitName | None:
-    """Return a canonical unit name for exact, plural, or Korean raw input."""
+    """Return a canonical unit name for exact, plural, spaced, or Korean raw input."""
 
-    if type(value) is not str:
-        return None
-    candidate = value.strip()
-    if candidate in UNIT_MODEL_BY_NAME:
-        return candidate
-    return UNIT_NAME_ALIASES.get(candidate.lower())
+    return resolve_aliased_name(value, UNIT_MODEL_BY_NAME, UNIT_NAME_ALIASES)
 
 
 def get_resolved_unit_model(value: object) -> UnitModel:

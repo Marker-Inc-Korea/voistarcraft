@@ -72,6 +72,26 @@ class MapTargetLookupTest(unittest.TestCase):
         self.assertIsNone(resolve_location_name(None))
         self.assertFalse(is_supported_location_name("섬멀티"))
 
+    def test_location_resolver_keeps_previous_spellings_after_shared_normalization(
+        self,
+    ) -> None:
+        previously_resolving_cases = (
+            ("main ramp", "main ramp"),
+            (" Enemy Mineral Line ", "enemy mineral line"),
+            ("MAIN   RAMP", "main ramp"),
+            ("natural choke", "natural choke"),
+            ("본진", "main base"),
+            (" 본진 입구 ", "main ramp"),
+            ("앞 마당", "natural expansion"),
+            ("적 미네랄 라인", "enemy mineral line"),
+            ("main base fallback", "main base"),
+            ("FRONT BUNKER", "front bunker"),
+        )
+
+        for raw_value, expected_name in previously_resolving_cases:
+            with self.subTest(case="previously_resolving", raw=raw_value):
+                self.assertEqual(expected_name, resolve_location_name(raw_value))
+
     def test_location_lookup_helpers_return_canonical_locations_and_tiles(self) -> None:
         main_ramp = get_map_location("main ramp")
 

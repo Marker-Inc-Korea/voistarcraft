@@ -1,5 +1,6 @@
 import unittest
 
+from toycraft_commander.aliases import normalize_alias_key, resolve_aliased_name
 from toycraft_commander.units import (
     COMBAT_UNIT_NAMES,
     ENEMY_UNIT_NAMES,
@@ -110,6 +111,39 @@ class UnitModelTest(unittest.TestCase):
         self.assertFalse(is_unit_produced_by("Medic", "Barracks"))
         self.assertFalse(is_unit_produced_by("Marine", None))
 
+    def test_unit_name_resolver_keeps_previous_spellings_and_adds_voice_variants(
+        self,
+    ) -> None:
+        previously_resolving_cases = (
+            ("Marine", "Marine"),
+            (" Marine ", "Marine"),
+            ("marines", "Marine"),
+            ("MARINES", "Marine"),
+            ("scv", "SCV"),
+            ("workers", "SCV"),
+            ("에스시비", "SCV"),
+            ("일꾼", "SCV"),
+            ("벌처", "Vulture"),
+            ("질럿", "Zealot"),
+        )
+        new_voice_variants = (
+            ("에스 시 비", "SCV"),
+            ("S C V", "SCV"),
+            ("일 꾼", "SCV"),
+            ("마 린", "Marine"),
+            ("MA RINES", "Marine"),
+            ("벌 처", "Vulture"),
+            ("VUL TURE", "Vulture"),
+            ("질 럿", "Zealot"),
+        )
+
+        for raw_value, expected_name in previously_resolving_cases:
+            with self.subTest(case="previously_resolving", raw=raw_value):
+                self.assertEqual(expected_name, resolve_unit_name(raw_value))
+        for raw_value, expected_name in new_voice_variants:
+            with self.subTest(case="new_voice_variant", raw=raw_value):
+                self.assertEqual(expected_name, resolve_unit_name(raw_value))
+
     def test_unit_name_resolver_normalizes_validator_input(self) -> None:
         self.assertEqual("Marine", resolve_unit_name(" Marine "))
         self.assertEqual("Marine", resolve_unit_name("marines"))
@@ -198,6 +232,51 @@ class UnitModelTest(unittest.TestCase):
             get_unit_names_by_producer("Starport")
         with self.assertRaisesRegex(KeyError, "Unsupported ToyCraft unit producer"):
             get_unit_models_by_producer("Starport")
+
+
+class AliasNormalizationTest(unittest.TestCase):
+    """Cover the shared voice/STT alias helpers used by units/structures/map."""
+
+    def test_normalize_alias_key_casefolds_and_strips_all_whitespace(self) -> None:
+        cases = (
+            ("Supply Depot", "supplydepot"),
+            (" 서플라이 \t 디포 ", "서플라이디포"),
+            ("MAIN   RAMP", "mainramp"),
+            ("marine", "marine"),
+            ("", ""),
+            ("   ", ""),
+        )
+
+        for raw_text, expected_key in cases:
+            with self.subTest(raw=raw_text):
+                self.assertEqual(expected_key, normalize_alias_key(raw_text))
+
+    def test_resolve_aliased_name_prefers_exact_canonical_match(self) -> None:
+        self.assertEqual(
+            "Marine",
+            resolve_aliased_name("Marine", ("SCV", "Marine"), {"마린": "Marine"}),
+        )
+        self.assertEqual(
+            "Marine",
+            resolve_aliased_name(" Marine ", ("SCV", "Marine"), {"마린": "Marine"}),
+        )
+
+    def test_resolve_aliased_name_matches_aliases_with_unstable_spacing(self) -> None:
+        alias_map = {"supply depot": "Supply Depot", "서플라이디포": "Supply Depot"}
+
+        for raw_value in ("supply depot", "SUPPLY  DEPOT", "서플라이 디포", "서플라이디포"):
+            with self.subTest(raw=raw_value):
+                self.assertEqual(
+                    "Supply Depot",
+                    resolve_aliased_name(raw_value, ("Supply Depot",), alias_map),
+                )
+
+    def test_resolve_aliased_name_rejects_unknown_and_non_string_values(self) -> None:
+        for raw_value in ("Medic", "", "   ", None, 1, ("Marine",)):
+            with self.subTest(raw=raw_value):
+                self.assertIsNone(
+                    resolve_aliased_name(raw_value, ("Marine",), {"마린": "Marine"})
+                )
 
 
 if __name__ == "__main__":

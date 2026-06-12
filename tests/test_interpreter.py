@@ -1537,6 +1537,133 @@ class KoreanInterpreterMappingTest(unittest.TestCase):
             payload,
         )
 
+    def test_defend_ramp_heuristic_maps_movement_verbs_with_unit_counts(self) -> None:
+        cases = (
+            (
+                "마린 6기 입구로 보내",
+                DefendIntent(
+                    priority="high",
+                    constraints=(DEFEND_RAMP_CONSTRAINT,),
+                    location=DEFEND_RAMP_LOCATION,
+                    unit_group="6 Marines",
+                ),
+            ),
+            (
+                "병력 입구로 보내",
+                DefendIntent(
+                    priority="high",
+                    constraints=(DEFEND_RAMP_CONSTRAINT,),
+                    location=DEFEND_RAMP_LOCATION,
+                    unit_group=DEFEND_RAMP_UNIT_GROUP,
+                ),
+            ),
+            (
+                "마린 입구로 이동",
+                DefendIntent(
+                    priority="high",
+                    constraints=(DEFEND_RAMP_CONSTRAINT,),
+                    location=DEFEND_RAMP_LOCATION,
+                    unit_group="Marines",
+                ),
+            ),
+        )
+
+        for command_text, expected_payload in cases:
+            with self.subTest(command_text=command_text):
+                payload = interpret_command_text(command_text)
+
+                self.assertEqual(expected_payload, payload)
+                validation = validate_intent_payload(payload.to_dict())
+                self.assertTrue(validation.executable)
+
+    def test_send_verb_without_ramp_word_never_becomes_defend(self) -> None:
+        # The movement verbs added for ramp defense must not capture scout or
+        # gather phrasing that carries no ramp location word.
+        result = interpret_command("정찰 보내")
+
+        self.assertIsNone(result.payload)
+        for candidate in result.candidates:
+            self.assertNotEqual("DEFEND", candidate.intent)
+
+    def test_scout_phrasings_with_ramp_words_resolve_to_scout(self) -> None:
+        # Regression: 보내/이동 movement verbs in the defend family must not
+        # turn explicit scout commands naming an entrance into ambiguity.
+        cases = (
+            "적 입구 정찰 보내",
+            "SCV 하나로 적 입구 정찰 보내",
+            "입구 쪽 정찰 보내",
+        )
+        for command_text in cases:
+            with self.subTest(command_text=command_text):
+                payload = interpret_command_text(command_text)
+                self.assertIsNotNone(payload)
+                self.assertEqual("SCOUT", payload.intent)
+
+    def test_mixed_scout_and_defense_verbs_stay_ambiguous(self) -> None:
+        # Naming both vocabularies must stay a clarification so the live
+        # pipeline can split the compound order per part.
+        result = interpret_command("정찰 보내고 입구 막아")
+
+        self.assertIsNone(result.payload)
+        candidate_intents = {candidate.intent for candidate in result.candidates}
+        self.assertIn("SCOUT", candidate_intents)
+        self.assertIn("DEFEND", candidate_intents)
+
+    def test_multi_digit_counts_resolve_exactly_never_by_substring(self) -> None:
+        # Regression: substring matching made "12기" execute as 2 and "18기"
+        # as 8 — a silently wrong order, which the house rules forbid.
+        cases = {
+            "마린 12기 입구로 보내": "12 Marines",
+            "마린 18기 입구로 보내": "18 Marines",
+            "마린 9기 입구로 보내": "9 Marines",
+            "마린 10기 입구로 보내": "10 Marines",
+            "마린 열두 기 입구로 보내": "12 Marines",
+            "마린 아홉 기 입구로 보내": "9 Marines",
+        }
+        for command_text, expected_group in cases.items():
+            with self.subTest(command_text=command_text):
+                payload = interpret_command_text(command_text)
+                self.assertIsNotNone(payload)
+                self.assertEqual("DEFEND", payload.intent)
+                self.assertEqual(expected_group, payload.unit_group)
+
+    def test_scv_transliteration_aliases_resolve_worker_production(self) -> None:
+        # Whisper renders spoken S-C-V in several hangul spellings; every
+        # common form must resolve, not just 에스시비.
+        for alias in ("에스시비", "에스씨브이", "에스시브이", "에스씨비"):
+            with self.subTest(alias=alias):
+                payload = interpret_command_text(f"{alias} 계속 찍어")
+                self.assertIsNotNone(payload)
+                self.assertEqual("TRAIN_WORKER", payload.intent)
+
+    def test_one_shot_worker_training_resolves_without_continuity_words(self) -> None:
+        # The clarification prompt advertises 일꾼 생산; one-shot phrasing must
+        # resolve too, with the exact count and without the continuity
+        # constraint that nothing enforces.
+        cases = {
+            "일꾼 뽑아": 1,
+            "SCV 하나 뽑아": 1,
+            "SCV 두 기 찍어": 2,
+            "일꾼 3기 생산해": 3,
+        }
+        for command_text, expected_count in cases.items():
+            with self.subTest(command_text=command_text):
+                payload = interpret_command_text(command_text)
+                self.assertIsNotNone(payload)
+                self.assertEqual("TRAIN_WORKER", payload.intent)
+                self.assertEqual(expected_count, payload.count)
+                self.assertNotIn(
+                    KEEP_WORKER_PRODUCTION_CONSTRAINT,
+                    payload.constraints,
+                )
+
+    def test_worker_phrased_build_commands_stay_in_build_family(self) -> None:
+        payload = interpret_command_text("SCV로 벙커 만들어")
+
+        self.assertIsNotNone(payload)
+        self.assertEqual("BUILD_STRUCTURE", payload.intent)
+        self.assertEqual("Bunker", payload.structure)
+
     def test_retreat_army_heuristic_maps_nearby_korean_free_utterance(self) -> None:
         payload = interpret_command_text("압박 실패했으니까 병력 살려서 뒤로 빼")
 

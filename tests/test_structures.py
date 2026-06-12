@@ -108,6 +108,42 @@ class StructureModelTest(unittest.TestCase):
         self.assertFalse(is_structure_capable_of("Barracks", None))
         self.assertFalse(is_supply_provider_structure_name("Barracks"))
 
+    def test_structure_name_resolver_keeps_previous_spellings_and_adds_voice_variants(
+        self,
+    ) -> None:
+        previously_resolving_cases = (
+            ("Supply Depot", "Supply Depot"),
+            ("supply depot", "Supply Depot"),
+            ("SUPPLY DEPOT", "Supply Depot"),
+            ("supplydepot", "Supply Depot"),
+            ("서플라이 디포", "Supply Depot"),
+            ("서플라이디포", "Supply Depot"),
+            (" barracks ", "Barracks"),
+            ("RAX", "Barracks"),
+            ("병영", "Barracks"),
+            ("factories", "Factory"),
+            ("군수공장", "Factory"),
+            ("리파이너리", "Refinery"),
+            ("가스통", "Refinery"),
+        )
+        new_voice_variants = (
+            ("서플 라이", "Supply Depot"),
+            ("보 급 고", "Supply Depot"),
+            ("Supply   DEPOT  ", "Supply Depot"),
+            ("배 럭", "Barracks"),
+            ("BAR RACKS", "Barracks"),
+            ("팩 토리", "Factory"),
+            ("가스 통", "Refinery"),
+            ("리파이너 리", "Refinery"),
+        )
+
+        for raw_value, expected_name in previously_resolving_cases:
+            with self.subTest(case="previously_resolving", raw=raw_value):
+                self.assertEqual(expected_name, resolve_structure_name(raw_value))
+        for raw_value, expected_name in new_voice_variants:
+            with self.subTest(case="new_voice_variant", raw=raw_value):
+                self.assertEqual(expected_name, resolve_structure_name(raw_value))
+
     def test_structure_name_resolver_normalizes_validator_input(self) -> None:
         self.assertEqual("Barracks", resolve_structure_name(" Barracks "))
         self.assertEqual("Barracks", resolve_structure_name("병영"))

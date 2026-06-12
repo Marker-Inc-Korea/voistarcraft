@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Final, Literal
 
+from toycraft_commander.aliases import resolve_aliased_name
+
 
 MapLocationName = Literal[
     "main",
@@ -281,13 +283,7 @@ TARGETABLE_POSITION_BY_NAME: Final[dict[MapLocationName, TargetablePosition]] = 
 def resolve_location_name(value: object) -> MapLocationName | None:
     """Return a canonical map location name for English or Korean raw input."""
 
-    if type(value) is not str:
-        return None
-    candidate = value.strip()
-    if candidate in MAP_LOCATION_BY_NAME:
-        return candidate
-    normalized_candidate = _normalize_lookup_key(candidate)
-    return MAP_LOCATION_ALIASES.get(normalized_candidate)
+    return resolve_aliased_name(value, MAP_LOCATION_BY_NAME, MAP_LOCATION_ALIASES)
 
 
 def get_map_location(name: MapLocationName) -> MapLocation:
@@ -381,7 +377,3 @@ def get_map_locations_by_kind(kind: MapLocationKind) -> tuple[MapLocation, ...]:
     if not locations:
         raise KeyError(f"Unsupported ToyCraft map location kind: {kind}")
     return locations
-
-
-def _normalize_lookup_key(value: str) -> str:
-    return "".join(value.casefold().split())
