@@ -1,45 +1,44 @@
 # TextCraft Commander (voistarcraft)
 
-말하면 스타가 움직인다 — speak (or type) Korean commands and StarCraft II
-executes them as real game API actions.
+말하면 스타가 움직인다.
 
-Natural-language RTS commander layer for real StarCraft II control. The
-project never emulates mouse clicks or screen automation: Korean commander
-text is interpreted into a typed Intent DSL, validated against live game
-state, planned as semantic StarCraft II actions, and issued through a
-`python-sc2` (burnysc2) BotAI adapter.
+TextCraft Commander turns Korean text or voice commands into semantic
+StarCraft commands. It does **not** emulate mouse clicks or screen input.
+Commands are interpreted into a typed Intent DSL, validated against game state,
+planned as semantic actions, and executed through game API boundaries.
 
-## Honest Status
+## Status
 
-Be clear about what is and is not proven:
+| Area | Status |
+| --- | --- |
+| Dry-run SC2 pipeline | Implemented and tested. Runs without StarCraft II. |
+| Live SC2 mode | Implemented, but not yet smoke-tested against a real local SC2 install. |
+| Voice input | Implemented behind optional `[voice]` dependencies. |
+| LLM fallback | Implemented behind optional `[llm]` dependencies and Anthropic API key. |
+| Web GUI | Implemented as a localhost-only stdlib server. |
+| Event memory | Implemented and used by state reports and GUI history. |
+| Standing orders | Implemented for continuous SCV production and supply-block prevention. |
+| Brood War / BWAPI | Semantic executor boundary implemented; real BWAPI adapter still requires a BWAPI machine. |
 
-- **Implemented and unit-tested (no StarCraft II needed):** the full live
-  pipeline code path — Korean interpreter, Intent DSL, live SC2 feasibility
-  validator, SC2 state resolver, semantic map-target resolver, python-sc2
-  BotAI adapter, Korean narrator, compound-command splitting, the
-  `demo_sc2` entrypoint (dry-run, scripted, interactive, voice, LLM, and GUI
-  modes), event memory, code-driven standing orders, the Brood War semantic
-  executor boundary, and faster-whisper Korean voice input. `python3 -m
-  pytest -q` currently passes 811 tests (1757 subtests) without StarCraft II,
-  python-sc2, BWAPI, Anthropic credentials, or audio hardware installed.
-- **Implemented but NOT yet smoke-tested against a real game:** live mode.
-  End-to-end live play requires a local StarCraft II installation plus the
-  `burnysc2` package, and that real-game smoke test has not been run in this
-  development environment yet. The live executor, on_step command queue, and
-  map derivation code exist and are exercised only against BotAI-like fakes.
-  Follow [docs/sc2-smoke-test.md](docs/sc2-smoke-test.md) to run the first
-  real smoke test yourself.
+Current offline verification:
 
-## Quickstart (dry-run, no StarCraft II needed)
+```bash
+python3 -m pytest -q
+# 811 passed, 1757 subtests passed
+```
 
-The dry-run mode runs the entire real pipeline (interpret -> validate ->
-plan -> execute -> narrate) against a built-in scripted fake BotAI:
+The suite does not require StarCraft II, `burnysc2`, BWAPI, Anthropic
+credentials, or audio hardware.
+
+## Quickstart
+
+Run the full commander pipeline against a scripted fake BotAI:
 
 ```bash
 python3 -m starcraft_commander.demo_sc2 --dry-run --script "마린 6기 입구로 보내고 SCV 계속 찍어" "상황 보고해줘"
 ```
 
-Real output from this command:
+Expected output:
 
 ```text
 StarCraft II Commander 데모 (dry-run)
@@ -87,172 +86,187 @@ Intent DSL:
 - #2 [executed] 명령을 실행했습니다. SCV 1기 생산 명령. 상비 명령 등록: 지속 SCV 생산.
 ```
 
-Note the honesty contract in action: the compound utterance is split into
-two commands, and `SCV 계속 찍어` registers a deterministic standing order
-instead of claiming an unsupported per-frame LLM behavior.
+Interactive dry-run:
 
-Omit `--script` for an interactive `명령>` prompt.
+```bash
+python3 -m starcraft_commander.demo_sc2 --dry-run
+```
 
 ## Installation
 
-Python **3.10+**. The core pipeline is pure stdlib; every runtime
-integration is an optional extra (see `pyproject.toml`):
+Python 3.10+.
 
 ```bash
-pip install -e .              # core: interpreter, validators, planners, dry-run demo
-pip install -e '.[sc2]'       # + burnysc2 (python-sc2 fork) for live games
-pip install -e '.[voice]'     # + faster-whisper, sounddevice for Korean voice input
-pip install -e '.[llm]'       # + anthropic for optional LLM fallback interpretation
-pip install -e '.[dev]'       # + pytest
+pip install -e .              # core: dry-run, interpreter, validators, planners
+pip install -e '.[sc2]'       # live SC2 mode via burnysc2
+pip install -e '.[voice]'     # Korean push-to-talk via faster-whisper + sounddevice
+pip install -e '.[llm]'       # Anthropic LLM fallback interpreter
+pip install -e '.[dev]'       # pytest
 ```
 
-Live games additionally require a local StarCraft II installation and maps;
-see [docs/sc2-smoke-test.md](docs/sc2-smoke-test.md).
+Live SC2 also requires a local StarCraft II installation and maps. See
+[docs/sc2-smoke-test.md](docs/sc2-smoke-test.md).
 
-## Live StarCraft II Mode
+## Run Modes
 
-Live mode (the default, no `--dry-run`) launches a local custom game against
-the built-in AI and feeds your Korean commands into the bot's `on_step` loop:
+### Dry-Run
+
+No StarCraft II required:
 
 ```bash
-python3 -m starcraft_commander.demo_sc2 --map AcropolisLE --difficulty easy
+python3 -m starcraft_commander.demo_sc2 --dry-run
+python3 -m starcraft_commander.demo_sc2 --dry-run --script "SCV 계속 찍어" "상황 보고"
 ```
 
-Requirements, map setup, expected behavior, troubleshooting, and the smoke
-test checklist live in [docs/sc2-smoke-test.md](docs/sc2-smoke-test.md).
-Again: this path is implemented but has not yet been verified against a real
-StarCraft II install.
+### Web GUI
 
-## Voice Mode
+Starts a localhost-only browser UI with command input, state, and history:
 
-Add `--voice` to either dry-run or live mode for push-to-talk Korean voice
-input (requires the `[voice]` extra):
+```bash
+python3 -m starcraft_commander.demo_sc2 --dry-run --gui
+python3 -m starcraft_commander.demo_sc2 --dry-run --gui 0
+```
+
+`--gui 0` asks the OS for an available port.
+
+### LLM Fallback
+
+Rules run first. The Anthropic fallback is used only for unsupported or
+ambiguous user utterances, and only once per user command. It is never called
+per game frame.
+
+```bash
+export ANTHROPIC_API_KEY=...
+python3 -m starcraft_commander.demo_sc2 --dry-run --llm
+python3 -m starcraft_commander.demo_sc2 --dry-run --llm --gui
+```
+
+LLM output is schema-gated to the 10 canonical intents and revalidated before
+execution.
+
+### Voice
+
+Push-to-talk Korean input:
 
 ```bash
 python3 -m starcraft_commander.demo_sc2 --dry-run --voice
-python3 -m starcraft_commander.demo_sc2 --voice --map AcropolisLE   # live
+python3 -m starcraft_commander.demo_sc2 --dry-run --voice --record-seconds 3
 ```
 
-- Press Enter to record a fixed window (default 5 seconds; tune with
-  `--record-seconds`), then the captured audio is transcribed with
-  faster-whisper (default model `small`, language `ko`).
-- The Whisper model downloads automatically on first use.
-- On macOS, grant microphone permission to your terminal app.
-- Missing voice dependencies fail fast with bilingual install hints.
+Notes:
 
-## StarCraft II Execution Path
+- Press Enter to record a fixed window.
+- Default transcription model is faster-whisper `small`, language `ko`.
+- The model downloads on first use.
+- macOS users must grant microphone permission to the terminal app.
+- Low-confidence transcriptions are re-prompted instead of executed.
 
-The `starcraft_commander` package is the real StarCraft II boundary. All
-modules are importable without StarCraft II or python-sc2 installed (lazy
-imports, duck-typed bot objects), so CI verifies the contracts with fakes:
+### Live StarCraft II
 
-- `contracts.py` — stable semantic SC2 action types (`assign_workers`,
-  `build_structure`, `train_unit`, `move_group`, `attack_move`, `repair`,
-  `observe`), JSON-ready plan/result contracts.
-- `sc2_executor.py` — Intent DSL -> `SC2ExecutionPlan` mapping and the
-  lifecycle-aware `SC2RuntimeExecutor` (`start(bot)` / `execute(plan)` /
-  `close()`); skipped actions and runtime exceptions become structured
-  results, never silent successes.
-- `python_sc2_adapter.py` — `PythonSC2BotAdapter` translates the seven
-  semantic action types into duck-typed BotAI operations, reporting
-  requested-vs-issued counts so partial issuance is never collapsed into a
-  bare success.
-- `state_resolver.py` — BotAI observations -> `SC2CommanderState`
-  (resources, supply, units, structures, threats, production), degrading
-  conservatively with observation notes when attributes are missing.
-- `map_resolver.py` — semantic map targets (`self_main`, `self_ramp`,
-  `enemy_natural`, `enemy_mineral_line`, ...) resolved to Point2-like
-  coordinates; underivable targets carry explicit unavailable reasons.
-- `feasibility.py` — live validation gate; unknown or incomplete game state
-  rejects mutating commands with Korean reasons and alternatives.
-- `narrator.py` — Korean narration of execution outcomes; partial or
-  blocked work is always disclosed.
-- `live_pipeline.py` — `SC2CommandSession` composing all of the above, with
-  heuristic Korean compound-command splitting (`...보내고 ...찍어`,
-  `그리고`/`하고`), event-memory recording, and standing-order registration.
-- `demo_sc2.py` — the runnable entrypoint described above.
-- `llm_interpreter.py` — rules-first Anthropic fallback for free-form Korean
-  utterances, schema-gated to the 10 canonical intents and called only per
-  user utterance.
-- `event_memory.py` / `standing_orders.py` / `web_gui.py` — bounded command
-  history, deterministic per-frame economy policies, and a localhost-only
-  stdlib web interface.
-- `voice_input.py` / `runtime_deps.py` — Korean speech-to-text seams and
-  bilingual optional-dependency guards.
-
-For the original product plan, gap analysis, and the step-by-step handoff
-sequence this code implements, see
-[docs/claude-handoff.md](docs/claude-handoff.md).
-
-## ToyCraft Offline Harness (Phase 0)
-
-ToyCraft is **not** the product runtime. It is the offline deterministic
-harness used to test the parser, validator, rule-engine, and narration
-contracts without a StarCraft II installation. Real StarCraft II integration
-lives behind the `starcraft_commander` semantic executor abstraction.
-
-### Phase 0 Intent Inventory
-
-The MVP supports exactly 10 canonical intents. See
-[docs/intent-inventory.md](docs/intent-inventory.md) and
-`toycraft_commander/intents.py` for the executable inventory. Parsed Korean
-commands serialize to the stable `toycraft.intent_dsl.v1` JSON document
-format via `IntentCommandPayload.to_dsl_document()` / `.to_dsl_json()`.
-
-### Phase 0 Component Architecture
-
-Component boundaries and the end-to-end command data flow (Korean input ->
-typed DSL -> validation -> rule execution -> narrated result) are documented
-in [docs/architecture.md](docs/architecture.md). `pipeline.py` coordinates
-independent interpreter, feasibility-validator, executor/rule-engine, and
-narrator layers; rejected or unclear commands stop before state mutation.
-The typed Intent DSL, validator, rule-engine, and executor interface
-contracts are documented in [docs/contracts.md](docs/contracts.md).
-
-### Phase 0 Models
-
-- **Units:** SCV, Marine, Vulture, Zealot — typed cost and combat stats in
-  `toycraft_commander/units.py`.
-- **Structures:** Barracks, Factory, Supply Depot, Refinery — construction
-  costs, build times, prerequisites, supply impact, and capabilities in
-  `toycraft_commander/structures.py`.
-- **Map targets:** a small named registry with Korean/English alias
-  resolution and integer tile positions in `toycraft_commander/map.py`.
-
-### Phase 0 Boundaries
-
-- **Interpreter** (`toycraft_commander/interpreter.py`): `CommandInterpreter`
-  maps Korean text to typed Intent DSL payloads; unsupported, malformed, or
-  ambiguous text returns a clarification result with no payload, so rejected
-  commands never reach validation or execution.
-- **Feasibility** (`toycraft_commander/feasibility.py`):
-  `ToyCraftFeasibilityValidator` gates payloads against an immutable
-  `ToyCraftState` snapshot — resources, supply, prerequisites, producers,
-  workers, unit groups, targets, and conflicting constraints.
-- **Executor / rule engine** (`toycraft_commander/executor.py`,
-  `tactical_controller.py`): `ToyCraftExecutor` delegates to the
-  deterministic ToyCraft rule engine for offline tests; handlers cover all
-  10 intents including resource ticks, build/train queues with reserved
-  supply, and deterministic defend/harass combat.
-- **Pipeline** (`toycraft_commander/pipeline.py`):
-  `CommandProcessingPipeline` is the thin coordinator UI/CLI/voice adapters
-  call first; parser exceptions become clarification responses and executor
-  exceptions become rule-execution failures without mutating state.
-- **Narrator** (`toycraft_commander/narrator.py`): `KoreanStateNarrator`
-  renders execution results and rejected outcomes into commander-facing
-  Korean, with typed metadata and mandatory blocked-command reports (reason,
-  alternative, reason codes). Blocked commands are never narrated as
-  success.
-
-The full interface details are in [docs/contracts.md](docs/contracts.md);
-the README intentionally does not duplicate them.
-
-### Phase 0 Korean Demo
+Requires StarCraft II, maps, and `[sc2]`:
 
 ```bash
-python -m toycraft_commander.demo
+python3 -m starcraft_commander.demo_sc2 --map AcropolisLE --difficulty easy
+python3 -m starcraft_commander.demo_sc2 --map AcropolisLE --difficulty easy --voice
+python3 -m starcraft_commander.demo_sc2 --map AcropolisLE --difficulty easy --gui
 ```
 
-A 5-7 minute scripted Korean walkthrough: prints the typed Intent DSL,
-validates and executes feasible ToyCraft state changes, advances
-deterministic production/build timers, and narrates each result.
+This path is implemented but has not yet been verified against a real local
+SC2 installation in this development environment. Follow
+[docs/sc2-smoke-test.md](docs/sc2-smoke-test.md) for the first real smoke test.
+
+## Supported Intents
+
+The MVP supports 10 canonical intents:
+
+| Intent | Examples |
+| --- | --- |
+| `GATHER_RESOURCE` | "SCV 4기 미네랄 캐" |
+| `BUILD_STRUCTURE` | "보급고 지어", "배럭 지어" |
+| `TRAIN_WORKER` | "SCV 계속 찍어", "일꾼 두 기 뽑아" |
+| `TRAIN_ARMY` | "마린 3기 뽑아" |
+| `SCOUT` | "적 본진 정찰 보내" |
+| `SUMMARIZE_STATE` | "상황 보고해줘" |
+| `DEFEND` | "마린 6기 입구로 보내" |
+| `REPAIR` | "SCV 2기로 벙커 수리해" |
+| `EXPAND` | "앞마당 가져가" |
+| `HARASS` | "벌처로 일꾼 견제해" |
+
+The executable inventory lives in [docs/intent-inventory.md](docs/intent-inventory.md).
+
+## Architecture
+
+```text
+Korean text / voice
+  -> rules-first interpreter, optional LLM fallback
+  -> typed Intent DSL
+  -> game-state resolver
+  -> feasibility validator
+  -> semantic action planner
+  -> runtime executor
+  -> game API adapter
+  -> Korean narrator + event memory
+```
+
+Key packages:
+
+- `starcraft_commander` — real SC2 commander boundary, demo entrypoint, and
+  semantic executor abstraction.
+- `broodwar_commander` — Brood War semantic executor boundary, pre-real-adapter.
+- `toycraft_commander` — offline deterministic harness used for parser,
+  validation, rule-engine, and narration tests.
+
+Important modules:
+
+- `starcraft_commander/demo_sc2.py` — CLI for dry-run, live, voice, LLM, GUI.
+- `starcraft_commander/live_pipeline.py` — session orchestration and compound commands.
+- `starcraft_commander/sc2_executor.py` — Intent DSL to semantic SC2 plans.
+- `starcraft_commander/python_sc2_adapter.py` — semantic actions to BotAI calls.
+- `starcraft_commander/event_memory.py` — bounded thread-safe command history.
+- `starcraft_commander/standing_orders.py` — per-frame code policies, never LLM.
+- `starcraft_commander/web_gui.py` — localhost-only stdlib web UI.
+- `starcraft_commander/llm_interpreter.py` — schema-gated Anthropic fallback.
+- `broodwar_commander/bw_executor.py` — BWAPI-style semantic plans and executor.
+
+Detailed design docs:
+
+- [docs/architecture.md](docs/architecture.md)
+- [docs/contracts.md](docs/contracts.md)
+- [docs/claude-handoff.md](docs/claude-handoff.md)
+- [docs/sc2-smoke-test.md](docs/sc2-smoke-test.md)
+
+## Safety And Honesty Contracts
+
+- No mouse automation.
+- Optional dependencies are lazy-loaded.
+- Blocked commands do not mutate state.
+- Partial or skipped work is never narrated as success.
+- Rejections include Korean reason and alternative.
+- The LLM can only produce schema-validated canonical intents.
+- The LLM is called per user utterance, never per game frame.
+- Web GUI binds to `127.0.0.1` only.
+
+## Development
+
+Run tests:
+
+```bash
+python3 -m pytest -q
+```
+
+Check import hygiene:
+
+```bash
+python3 -c "import starcraft_commander, toycraft_commander, broodwar_commander; print('imports-ok')"
+python3 -c "import json, sys; import starcraft_commander, broodwar_commander; print(json.dumps([m for m in ['sc2','anthropic','faster_whisper','sounddevice'] if m in sys.modules]))"
+```
+
+Expected output for the second command is `[]`.
+
+## Remaining Real-World Validation
+
+These require external software and are intentionally not claimed as completed:
+
+- Run the live SC2 smoke test on a machine with StarCraft II and maps installed.
+- Build and validate a real BWAPI binding adapter on a Brood War + BWAPI setup.
+- Run a live Anthropic API check with `ANTHROPIC_API_KEY`.
