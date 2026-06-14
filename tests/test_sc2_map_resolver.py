@@ -250,8 +250,11 @@ class SC2MapResolverFromBotTest(unittest.TestCase):
     def test_executor_target_aliases_resolve_to_canonical_targets(self) -> None:
         for alias, canonical in (
             ("main", "self_main"),
+            ("우리 본진", "self_main"),
             ("main ramp", "self_ramp"),
+            ("우리 입구", "self_ramp"),
             ("natural expansion", "self_natural"),
+            ("우리 앞마당", "self_natural"),
             ("enemy main", "enemy_main"),
             ("enemy front", "enemy_ramp"),
             ("enemy natural", "enemy_natural"),

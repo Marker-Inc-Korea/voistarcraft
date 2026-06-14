@@ -29,7 +29,12 @@ from toycraft_commander.interpreter import (
     CommandInterpreterInterface,
 )
 
-from starcraft_commander.contracts import SC2ExecutionPlan, SC2PlanExecutionResult
+from starcraft_commander.contracts import (
+    SC2ActionType,
+    SC2CommandAction,
+    SC2ExecutionPlan,
+    SC2PlanExecutionResult,
+)
 from starcraft_commander.feasibility import (
     DEFAULT_SC2_FEASIBILITY_VALIDATOR,
     SC2FeasibilityResult,
@@ -105,10 +110,75 @@ SC2_STANDING_ORDER_REGISTRATION_PREFIX: Final[str] = "상비 명령 등록"
 _SUMMARIZE_STATE_INTENT_NAME: Final[str] = "SUMMARIZE_STATE"
 """Intent whose read-only outcomes get standing-order/memory enrichment."""
 
+_ANSWER_QUESTION_INTENT_NAME: Final[str] = "ANSWER_QUESTION"
+"""Read-only pseudo intent for help/capability questions, never game actions."""
+
 _EXECUTED_OUTCOME_STATUSES: Final[frozenset[str]] = frozenset(
     {"executed", "partially_executed", "read_only"}
 )
 """Outcome statuses that count as a successful execution for registration."""
+
+_LOCATION_QUESTION_PATTERNS: Final[tuple[str, ...]] = (
+    "위치",
+    "장소",
+    "좌표",
+    "건물에",
+    "건물 위치",
+    "지정",
+    "place",
+    "location",
+    "position",
+)
+_VOICE_QUESTION_PATTERNS: Final[tuple[str, ...]] = (
+    "음성",
+    "마이크",
+    "말로",
+    "voice",
+    "microphone",
+)
+_CAPABILITY_QUESTION_PATTERNS: Final[tuple[str, ...]] = (
+    "뭐 할 수",
+    "무엇을 할 수",
+    "어떤 명령",
+    "명령 알려",
+    "사용법",
+    "도움말",
+    "help",
+    "commands",
+)
+_QUESTION_MARKERS: Final[tuple[str, ...]] = (
+    "?",
+    "？",
+    "가능",
+    "되나",
+    "돼",
+    "되나요",
+    "되냐",
+    "할 수",
+    "어떻게",
+    "알려",
+    "지원",
+)
+
+_LOCATION_QUESTION_ANSWER: Final[str] = (
+    "네, 건물 위치는 현재 의미 기반 위치로 지정할 수 있습니다. "
+    "예: `본진에 배럭 지어`, `본진 입구에 보급고 지어`, "
+    "`본진 가스에 정제소 지어`, `앞마당에 커맨드 지어`, "
+    "`앞마당 입구에 벙커 지어`. 지금은 마우스 좌표를 찍는 방식이 아니라 "
+    "SC2 API가 이해할 수 있는 semantic target으로 변환해 건설합니다."
+)
+_VOICE_QUESTION_ANSWER: Final[str] = (
+    "네, 음성 입력을 지원합니다. `[voice]` 의존성 설치 후 "
+    "`python3 -m starcraft_commander.demo_sc2 --dry-run --voice` 또는 "
+    "`python3 -m starcraft_commander.demo_sc2 --map AcropolisLE --difficulty easy --voice`"
+    "로 실행합니다. macOS에서는 터미널 앱에 마이크 권한을 허용해야 합니다."
+)
+_CAPABILITY_QUESTION_ANSWER: Final[str] = (
+    "현재 지원하는 MVP 명령은 상태 확인, 일꾼 생산, 자원 채취, 구조물 건설, "
+    "병력 생산, 정찰, 방어, 수리, 확장, 견제입니다. 예: `상태확인`, "
+    "`SCV 여러개 뽑아`, `자원채취`, `보급고 지어`, `정찰보내`, "
+    "`마린 생산해`, `본진 입구 막아`."
+)
 
 
 def split_compound_command(text: str) -> tuple[str, ...]:
@@ -132,6 +202,75 @@ def _has_explicit_connective(text: str) -> bool:
     """Return whether the utterance contains a standalone 그리고/하고."""
 
     return _EXPLICIT_CONNECTIVE_PATTERN.search(text) is not None
+
+
+def _normalize_question_text(text: str) -> str:
+    if not isinstance(text, str):
+        return ""
+    normalized = " ".join(text.casefold().split())
+    if normalized.startswith("그리고 "):
+        normalized = normalized[len("그리고 ") :]
+    return normalized.strip()
+
+
+def _contains_question_pattern(text: str, patterns: tuple[str, ...]) -> bool:
+    return any(pattern in text for pattern in patterns)
+
+
+def _question_answer_for(text: str) -> tuple[str, str] | None:
+    """Return a read-only answer for known capability questions."""
+
+    normalized = _normalize_question_text(text)
+    if not normalized:
+        return None
+    if not _contains_question_pattern(normalized, _QUESTION_MARKERS):
+        return None
+    if _contains_question_pattern(normalized, _LOCATION_QUESTION_PATTERNS):
+        return "building_location_help", _LOCATION_QUESTION_ANSWER
+    if _contains_question_pattern(normalized, _VOICE_QUESTION_PATTERNS):
+        return "voice_help", _VOICE_QUESTION_ANSWER
+    if _contains_question_pattern(normalized, _CAPABILITY_QUESTION_PATTERNS):
+        return "capability_help", _CAPABILITY_QUESTION_ANSWER
+    return None
+
+
+def _question_outcome(command_text: str, topic: str, answer: str) -> SC2CommandOutcome:
+    """Build a read-only outcome for commander questions without touching SC2."""
+
+    action = SC2CommandAction(
+        action_type=SC2ActionType.OBSERVE,
+        subject="help",
+        target=topic,
+        count=1,
+        metadata={"question": command_text},
+    )
+    plan = SC2ExecutionPlan(
+        intent_name=_ANSWER_QUESTION_INTENT_NAME,
+        priority="normal",
+        ordered_actions=(action,),
+        constraints=("answer commander question without issuing game actions",),
+        requires_live_sc2=False,
+        notes=("Question answers are read-only and never issue SC2 API commands.",),
+        audit={"topic": topic},
+    )
+    execution_result = SC2PlanExecutionResult(
+        plan=plan,
+        attempted_actions=(action,),
+        applied_actions=(action,),
+        audit={"topic": topic},
+    )
+    return SC2CommandOutcome(
+        command_text=command_text,
+        status="read_only",
+        narration=answer,
+        intent_dsl={
+            "intent": _ANSWER_QUESTION_INTENT_NAME,
+            "topic": topic,
+            "read_only": True,
+        },
+        plan=plan,
+        execution_result=execution_result,
+    )
 
 
 @dataclass(frozen=True)
@@ -310,6 +449,16 @@ class SC2CommandSession:
         one command, and unresolvable text returns the interpreter's own
         Korean clarification unchanged.
         """
+
+        question_answer = _question_answer_for(command_text)
+        if question_answer is not None:
+            topic, answer = question_answer
+            return (
+                self._finalize_outcome(
+                    _question_outcome(command_text, topic, answer),
+                    None,
+                ),
+            )
 
         interpretation = self.interpreter.interpret(command_text)
         full_payload = getattr(interpretation, "payload", None)

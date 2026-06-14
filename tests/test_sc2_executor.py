@@ -398,6 +398,16 @@ class SC2ActionPlannerTest(unittest.TestCase):
     def test_target_aliases_cover_every_toycraft_canonical_map_location(self) -> None:
         self.assertLessEqual(frozenset(MAP_LOCATION_NAMES), frozenset(SC2_TARGET_ALIASES))
         self.assertIn("main base fallback", SC2_TARGET_ALIASES)
+        for alias, canonical in (
+            ("우리 본진", "self_main"),
+            ("우리본진", "self_main"),
+            ("우리 입구", "self_ramp"),
+            ("우리 본진 입구", "self_ramp"),
+            ("우리 가스", "self_geyser"),
+            ("우리 앞마당", "self_natural"),
+        ):
+            with self.subTest(alias=alias):
+                self.assertEqual(canonical, SC2_TARGET_ALIASES[alias])
         self.assertLessEqual(
             frozenset(SC2_TARGET_ALIASES.values()),
             SC2_SEMANTIC_TARGET_NAMES,

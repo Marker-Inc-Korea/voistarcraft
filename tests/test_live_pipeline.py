@@ -287,6 +287,45 @@ class LivePipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("SUMMARIZE_STATE", outcome.intent_dsl["intent"])
         self.assertTrue(outcome.execution_result.success)
 
+    async def test_building_location_question_gets_read_only_answer(self) -> None:
+        session = make_session(LivePipelineFakeBot())
+
+        outcomes = await session.process_text("그리고 위치를 내가 지정할수도 있어? 건물에")
+
+        self.assertEqual(1, len(outcomes))
+        outcome = outcomes[0]
+        self.assertEqual("read_only", outcome.status)
+        self.assertEqual("ANSWER_QUESTION", outcome.intent_dsl["intent"])
+        self.assertEqual("building_location_help", outcome.intent_dsl["topic"])
+        self.assertIn("의미 기반 위치", outcome.narration)
+        self.assertIn("본진 입구에 보급고", outcome.narration)
+        self.assertEqual("ANSWER_QUESTION", outcome.plan.intent_name)
+        self.assertTrue(outcome.execution_result.success)
+
+    async def test_voice_support_question_gets_read_only_answer(self) -> None:
+        session = make_session(LivePipelineFakeBot())
+
+        outcomes = await session.process_text("음성지원도 되나?")
+
+        self.assertEqual(1, len(outcomes))
+        outcome = outcomes[0]
+        self.assertEqual("read_only", outcome.status)
+        self.assertEqual("voice_help", outcome.intent_dsl["topic"])
+        self.assertIn("--voice", outcome.narration)
+        self.assertIn("마이크 권한", outcome.narration)
+
+    async def test_capability_question_gets_read_only_answer(self) -> None:
+        session = make_session(LivePipelineFakeBot())
+
+        outcomes = await session.process_text("어떤 명령을 할 수 있어?")
+
+        self.assertEqual(1, len(outcomes))
+        outcome = outcomes[0]
+        self.assertEqual("read_only", outcome.status)
+        self.assertEqual("capability_help", outcome.intent_dsl["topic"])
+        self.assertIn("상태 확인", outcome.narration)
+        self.assertIn("정찰", outcome.narration)
+
     async def test_infeasible_command_is_blocked_with_reason_and_alternative(self) -> None:
         bot = LivePipelineFakeBot(minerals=0)
         session = make_session(bot)
@@ -481,6 +520,29 @@ class LivePipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(outcome.plan)
         self.assertIsNone(outcome.execution_result)
         self.assertEqual([], bot.issued_commands)
+
+    async def test_korean_friendly_main_alias_from_llm_payload_executes(self) -> None:
+        bot = LivePipelineFakeBot(marines=2)
+        payload = {
+            "intent": "DEFEND",
+            "unit_group": "available combat units",
+            "location": "우리 본진",
+        }
+        session = make_session(bot, interpreter=StaticInterpreter(payload))
+
+        outcomes = await session.process_text("지금 공격받고있으니깐 대응해 저그")
+
+        self.assertEqual(1, len(outcomes))
+        outcome = outcomes[0]
+        self.assertEqual("executed", outcome.status)
+        self.assertEqual("self_main", outcome.plan.actions[0].target)
+        self.assertEqual(
+            [
+                ("attack", "Marine", (30.0, 30.0)),
+                ("attack", "Marine", (30.0, 30.0)),
+            ],
+            bot.issued_commands,
+        )
 
     async def test_executed_outcome_to_dict_json_round_trip(self) -> None:
         session = make_session(LivePipelineFakeBot())
