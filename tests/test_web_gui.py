@@ -55,12 +55,30 @@ def bridge_threads_alive():
     ]
 
 
+class FakeConfiguredLLMControl:
+    """Configured LLM control test double that avoids provider SDK calls."""
+
+    def snapshot(self):
+        return {
+            "provider": "openai",
+            "model": "gpt-test",
+            "configured": True,
+            "key_present": True,
+        }
+
+    def configure(self, provider, api_key, model=""):
+        return self.snapshot()
+
+
 class WebGuiServerHTTPTest(unittest.TestCase):
     """End-to-end HTTP tests against a dry-run session on an ephemeral port."""
 
     def setUp(self):
         session, self.bot = build_dry_run_session()
-        self.bridge = SessionLoopBridge(session=session)
+        self.bridge = SessionLoopBridge(
+            session=session,
+            llm_control=FakeConfiguredLLMControl(),
+        )
         self.bridge.start()
         self.addCleanup(self.bridge.stop)
         self.server = WebGuiServer(bridge=self.bridge, port=0)
@@ -124,6 +142,11 @@ class WebGuiServerHTTPTest(unittest.TestCase):
             "전송",
             "커맨더 채팅",
             "전장 대시보드",
+            "전략 브리핑",
+            "이전 대화 일부 생략",
+            "English",
+            "中文",
+            "LLM 필수",
             "setInterval(pollHistory",
             "setInterval(pollState",
         ):
@@ -181,9 +204,52 @@ class WebGuiServerHTTPTest(unittest.TestCase):
         self.assertEqual(document["own_units"].get("SCV"), 12)
 
     def test_llm_status_endpoint_never_exposes_key(self):
-        document = self.get_json("/api/llm")
+        session, _bot = build_dry_run_session()
+        bridge = SessionLoopBridge(session=session)
+        bridge.start()
+        self.addCleanup(bridge.stop)
+        server = WebGuiServer(bridge=bridge, port=0)
+        server.start()
+        self.addCleanup(server.stop)
+
+        connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
+        try:
+            connection.request("GET", "/api/llm")
+            response = connection.getresponse()
+            payload = response.read()
+        finally:
+            connection.close()
+        self.assertEqual(response.status, 200)
+        document = json.loads(payload.decode("utf-8"))
         self.assertFalse(document["configured"])
         self.assertNotIn("api_key", document)
+
+    def test_command_is_rejected_until_llm_is_configured(self):
+        session, _bot = build_dry_run_session()
+        bridge = SessionLoopBridge(session=session)
+        bridge.start()
+        self.addCleanup(bridge.stop)
+        server = WebGuiServer(bridge=bridge, port=0)
+        server.start()
+        self.addCleanup(server.stop)
+
+        connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
+        try:
+            body = json.dumps({"text": "상태확인"}).encode("utf-8")
+            connection.request(
+                "POST",
+                "/api/command",
+                body=body,
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode("utf-8"))
+        finally:
+            connection.close()
+        self.assertEqual(response.status, 409)
+        self.assertEqual(payload["accepted"], False)
+        self.assertIn("LLM", payload["error"])
+        self.assertTrue(contains_hangul(payload["error"]))
 
     def test_llm_config_endpoint_sets_process_local_key(self):
         session, _bot = build_dry_run_session()
@@ -505,6 +571,10 @@ class RenderWebGuiPageTest(unittest.TestCase):
             "일꾼",
             "병력",
             "건물",
+            "전략 브리핑",
+            "Strategy Briefing",
+            "战略简报",
+            "MAX_CHAT_EVENTS",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, page)

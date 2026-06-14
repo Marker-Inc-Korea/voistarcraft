@@ -121,18 +121,22 @@ python3 -m starcraft_commander.demo_sc2 --map AcropolisLE --difficulty easy
   iteration, not instantly at the prompt.
 - Exit command input with `종료`, `quit`, or EOF; the game keeps running.
 
-For local browser control and web-entered API keys:
+For local browser control:
 
 ```bash
 SC2PATH="/Users/jinminseong/Desktop/StarCraft2/StarCraft II" \
+OPENAI_API_KEY="sk-..." \
 python3 -m starcraft_commander.demo_sc2 \
   --map AcropolisLE --difficulty easy \
   --gui
 ```
 
 - Open the printed `http://127.0.0.1:PORT` URL.
-- Enter the OpenAI key in **LLM 설정**. The key stays in the running Python
-  process memory only; `/api/llm` returns status metadata, never the key.
+- Live mode fails before StarCraft II starts unless the selected provider key
+  is already available through `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`.
+- The **LLM 설정** panel can rotate the running process key after startup. The
+  key stays in process memory only; `/api/llm` returns status metadata, never
+  the key.
 - Defaults: `--llm-provider openai`, `--llm-model gpt-4.1-mini`.
 - Use windowed/borderless StarCraft II or a second monitor so the browser
   remains usable while the game is running.

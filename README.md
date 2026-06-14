@@ -147,9 +147,12 @@ python3 -m starcraft_commander.demo_sc2 \
 Open the printed `http://127.0.0.1:PORT` URL on the same Mac. If StarCraft II
 is exclusive fullscreen, local GUI typing requires switching focus away from
 the game; use windowed/borderless mode or a second monitor for stable local
-GUI control. Enter your OpenAI API key in the web GUI's **LLM 설정** panel; the
-key is kept only in the running Python process memory and is never written to
-repo files or returned by `/api/llm`.
+GUI control. Live mode now fails before StarCraft II starts unless the selected
+provider key is already available through `OPENAI_API_KEY` or
+`ANTHROPIC_API_KEY`. The web GUI's **LLM 설정** panel can rotate the key for the
+running local process, but it cannot bypass startup preflight. Keys are kept
+only in process memory and are never written to repo files or returned by
+`/api/llm`.
 
 For phone/tablet companion control on the same Wi-Fi:
 
@@ -176,9 +179,10 @@ python3 -m starcraft_commander.demo_sc2 --dry-run
 python3 -m starcraft_commander.demo_sc2 --dry-run --gui
 ```
 
-The live web GUI can also set the key after startup. Defaults are
-`--llm-provider openai` and `--llm-model gpt-4.1-mini`; Anthropic remains
-available with `--llm-provider anthropic`.
+Live mode requires the selected key before startup. Defaults are
+`--llm-provider openai`, `OPENAI_API_KEY`, and `--llm-model gpt-4.1-mini`;
+Anthropic remains available with `--llm-provider anthropic` and
+`ANTHROPIC_API_KEY`.
 
 LLM output is schema-gated to the 10 canonical intents and revalidated before
 execution.

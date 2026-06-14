@@ -314,6 +314,17 @@ class LiveModeGuardTest(unittest.TestCase):
         self.assertIn("설정", message)
         self.assertNotIn("is not installed", message)
 
+    def test_live_local_llm_control_requires_provider_key_before_start(self) -> None:
+        with mock.patch.object(demo_sc2, "require_openai", mock.Mock()):
+            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
+                with self.assertRaises(MissingLLMDependencyError) as context:
+                    demo_sc2.build_local_llm_control(
+                        "openai", demo_sc2.DEFAULT_OPENAI_MODEL
+                    )
+        message = str(context.exception)
+        self.assertIn("OPENAI_API_KEY", message)
+        self.assertIn("LLM", message)
+
     @unittest.skipIf(PYTHON_SC2_INSTALLED, "python-sc2 is installed in this environment")
     def test_run_live_raises_actionable_missing_runtime_error(self) -> None:
         with self.assertRaises(MissingSC2RuntimeError) as context:
@@ -371,11 +382,12 @@ class RunLiveWiringTest(unittest.TestCase):
 
         modules = build_fake_sc2_modules(fake_run_game)
         buffer = io.StringIO()
+        llm_control = mock.Mock()
         with mock.patch.dict(sys.modules, modules):
             with mock.patch.object(
                 demo_sc2,
-                "build_llm_interpreter",
-                mock.Mock(return_value=None),
+                "build_local_llm_control",
+                mock.Mock(return_value=llm_control),
             ):
                 with contextlib.redirect_stdout(buffer):
                     demo_sc2.run_live(demo_sc2.parse_args([]))
@@ -406,11 +418,12 @@ class RunLiveWiringTest(unittest.TestCase):
             raise AssertionError("run_game must not be reached without voice deps")
 
         modules = build_fake_sc2_modules(fail_run_game)
+        llm_control = mock.Mock()
         with mock.patch.dict(sys.modules, modules):
             with mock.patch.object(
                 demo_sc2,
-                "build_llm_interpreter",
-                mock.Mock(return_value=None),
+                "build_local_llm_control",
+                mock.Mock(return_value=llm_control),
             ):
                 with self.assertRaises(RuntimeMissingVoiceDependencyError) as context:
                     demo_sc2.run_live(demo_sc2.parse_args(["--voice"]))

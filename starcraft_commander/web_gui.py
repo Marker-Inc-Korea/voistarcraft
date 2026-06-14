@@ -61,6 +61,13 @@ DEFAULT_WEB_GUI_PORT: Final[int] = 8350
 WEB_GUI_PAGE_TITLE: Final[str] = "VoiStarCraft 커맨더"
 """Korean single-page UI title."""
 
+LLM_REQUIRED_COMMAND_ERROR: Final[str] = (
+    "LLM 키가 설정되지 않아 명령을 실행하지 않았습니다. "
+    "이 프로젝트는 LLM 기반 해석을 필수로 사용합니다. "
+    "우측 LLM 설정에서 OpenAI 또는 Anthropic API 키를 먼저 설정하세요."
+)
+"""User-facing refusal when a command arrives before local LLM configuration."""
+
 WEB_GUI_POLL_INTERVAL_MS: Final[int] = 1000
 """Browser polling interval for ``/api/state`` and ``/api/history``."""
 
@@ -398,48 +405,69 @@ _WEB_GUI_PAGE_TEMPLATE: Final[str] = """<!DOCTYPE html>
 <style>
   :root {
     color-scheme: light;
-    --ink: #17212b;
-    --muted: #607080;
-    --panel: rgba(255, 255, 255, 0.86);
-    --panel-strong: #ffffff;
-    --line: rgba(33, 47, 61, 0.12);
-    --accent: #0f766e;
-    --accent-dark: #0b5f59;
-    --amber: #b7791f;
-    --red: #b42318;
-    --blue: #1d4ed8;
-    --shadow: 0 24px 70px rgba(17, 24, 39, 0.14);
+    --ink: #eff6ff;
+    --muted: #9fb3d9;
+    --panel: rgba(7, 13, 34, 0.78);
+    --panel-strong: rgba(14, 23, 54, 0.92);
+    --line: rgba(136, 169, 255, 0.2);
+    --accent: #4deeea;
+    --accent-dark: #33c7ff;
+    --amber: #ffd166;
+    --red: #ff6b8a;
+    --blue: #80a7ff;
+    --violet: #b58cff;
+    --shadow: 0 28px 90px rgba(0, 0, 0, 0.38);
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; min-height: 100vh; padding: 22px; color: var(--ink);
     font-family: "Avenir Next", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
     background:
-      radial-gradient(circle at 12% 10%, rgba(15, 118, 110, 0.22), transparent 32%),
-      radial-gradient(circle at 92% 12%, rgba(183, 121, 31, 0.18), transparent 28%),
-      linear-gradient(135deg, #edf7f2 0%, #f6efe1 48%, #e8eef7 100%);
+      radial-gradient(circle at 14% 12%, rgba(77, 238, 234, 0.28), transparent 30%),
+      radial-gradient(circle at 82% 4%, rgba(181, 140, 255, 0.25), transparent 26%),
+      radial-gradient(circle at 78% 84%, rgba(255, 209, 102, 0.16), transparent 30%),
+      linear-gradient(135deg, #030816 0%, #0a1230 42%, #1a0f2e 100%);
   }
   body::before {
     content: ""; position: fixed; inset: 0; pointer-events: none; opacity: 0.28;
     background-image:
-      linear-gradient(rgba(23, 33, 43, 0.06) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(23, 33, 43, 0.06) 1px, transparent 1px);
-    background-size: 34px 34px;
+      radial-gradient(circle, rgba(239, 246, 255, 0.75) 1px, transparent 1.5px),
+      linear-gradient(rgba(128, 167, 255, 0.08) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(128, 167, 255, 0.08) 1px, transparent 1px);
+    background-size: 120px 120px, 38px 38px, 38px 38px;
+  }
+  body::after {
+    content: ""; position: fixed; inset: auto -12% -35% 46%; width: 70vw; height: 70vw;
+    pointer-events: none; border-radius: 999px;
+    background: radial-gradient(circle, rgba(77, 238, 234, 0.18), transparent 58%);
+    filter: blur(6px);
   }
   .app-shell { position: relative; z-index: 1; max-width: 1480px; margin: 0 auto; }
+  .language-switcher {
+    display: flex; gap: 8px; justify-content: flex-end; margin-bottom: 12px;
+  }
+  .language-switcher button {
+    border: 1px solid var(--line); border-radius: 999px; padding: 8px 11px;
+    color: var(--ink); background: rgba(255, 255, 255, 0.08); cursor: pointer;
+    font-weight: 900;
+  }
+  .language-switcher button.active {
+    background: linear-gradient(135deg, var(--accent), var(--violet));
+    color: #04111f; border-color: transparent;
+  }
   .hero {
     display: flex; align-items: flex-end; justify-content: space-between; gap: 18px;
     margin-bottom: 18px;
   }
   .eyebrow {
-    margin: 0 0 8px; color: var(--accent-dark); font-weight: 800;
+    margin: 0 0 8px; color: var(--accent); font-weight: 800;
     letter-spacing: 0.12em; text-transform: uppercase; font-size: 0.76rem;
   }
   h1 { margin: 0; font-size: clamp(2rem, 4vw, 4.2rem); line-height: 0.95; letter-spacing: -0.06em; }
   p.hint { margin: 8px 0 0; color: var(--muted); font-size: 0.95rem; }
   .connection-pill {
     flex: 0 0 auto; padding: 10px 14px; border: 1px solid var(--line);
-    border-radius: 999px; background: rgba(255, 255, 255, 0.72);
+    border-radius: 999px; background: rgba(7, 13, 34, 0.72);
     box-shadow: 0 10px 30px rgba(17, 24, 39, 0.08); font-weight: 800;
   }
   main { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(330px, 0.75fr); gap: 18px; align-items: stretch; }
@@ -452,20 +480,20 @@ _WEB_GUI_PAGE_TEMPLATE: Final[str] = """<!DOCTYPE html>
   .chat-header {
     display: flex; justify-content: space-between; gap: 12px; align-items: center;
     padding: 18px 20px; border-bottom: 1px solid var(--line);
-    background: linear-gradient(90deg, rgba(15, 118, 110, 0.12), rgba(255, 255, 255, 0.26));
+    background: linear-gradient(90deg, rgba(77, 238, 234, 0.15), rgba(181, 140, 255, 0.13));
   }
   .chat-title { margin: 0; font-size: 1rem; font-weight: 900; }
   .chat-subtitle { margin: 3px 0 0; color: var(--muted); font-size: 0.82rem; }
   .quick-commands { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
   .quick-commands button {
-    border: 1px solid rgba(15, 118, 110, 0.24); background: #ffffff; color: var(--accent-dark);
+    border: 1px solid rgba(77, 238, 234, 0.3); background: rgba(255, 255, 255, 0.08); color: var(--ink);
     border-radius: 999px; padding: 8px 10px; font-weight: 800; cursor: pointer;
   }
   #state-panel {
     min-width: 0; background: var(--panel); border: 1px solid var(--line);
     border-radius: 28px; padding: 18px; box-shadow: var(--shadow); backdrop-filter: blur(18px);
   }
-  #state-panel h2, #llm-panel h2 { margin: 0 0 10px; font-size: 1rem; letter-spacing: -0.02em; }
+  #state-panel h2, #llm-panel h2, #briefing-panel h2 { margin: 0 0 10px; font-size: 1rem; letter-spacing: -0.02em; }
   .dashboard-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .metric-card {
     min-height: 86px; padding: 13px; border-radius: 20px; background: var(--panel-strong);
@@ -479,25 +507,33 @@ _WEB_GUI_PAGE_TEMPLATE: Final[str] = """<!DOCTYPE html>
   .metric-card dd { margin: 0; font-size: 1.28rem; font-weight: 900; font-variant-numeric: tabular-nums; }
   .wide-card { grid-column: 1 / -1; }
   #state-availability { margin: 12px 0 0; font-size: 0.82rem; color: var(--muted); }
-  #llm-panel {
+  #briefing-panel, #llm-panel {
     margin-top: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 22px;
-    background: rgba(255, 255, 255, 0.74);
+    background: rgba(255, 255, 255, 0.07);
+  }
+  #strategy-briefing {
+    margin: 0; color: var(--ink); line-height: 1.55; font-size: 0.92rem; white-space: pre-wrap;
+  }
+  .chat-trim-note {
+    margin: 0 auto 14px; width: fit-content; max-width: 90%; padding: 7px 11px;
+    color: var(--muted); border: 1px solid var(--line); border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08); font-size: 0.78rem; font-weight: 800;
   }
   #llm-panel label { display: block; margin: 8px 0 4px; font-size: 0.78rem; font-weight: 900; color: var(--muted); }
   #llm-panel select, #llm-panel input {
     width: 100%; padding: 10px 11px; border: 1px solid rgba(96, 112, 128, 0.28);
-    border-radius: 12px; background: rgba(255, 255, 255, 0.9);
+    border-radius: 12px; background: rgba(255, 255, 255, 0.92); color: #071225;
   }
   #llm-panel button {
     width: 100%; margin-top: 10px; padding: 11px 12px; border: none; border-radius: 14px;
-    background: var(--ink); color: #ffffff; font-weight: 900; cursor: pointer;
+    background: linear-gradient(135deg, var(--accent), var(--violet)); color: #061126; font-weight: 900; cursor: pointer;
   }
   #llm-status { margin: 8px 0 0; font-size: 0.78rem; color: var(--muted); }
   #log {
     flex: 1; min-height: 360px; overflow-y: auto; padding: 20px;
     background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.36), rgba(255, 255, 255, 0.1)),
-      radial-gradient(circle at 20% 20%, rgba(15, 118, 110, 0.08), transparent 32%);
+      linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
+      radial-gradient(circle at 20% 20%, rgba(77, 238, 234, 0.11), transparent 32%);
   }
   .log-entry { display: grid; gap: 8px; margin: 0 0 16px; }
   .message {
@@ -505,11 +541,11 @@ _WEB_GUI_PAGE_TEMPLATE: Final[str] = """<!DOCTYPE html>
     box-shadow: 0 10px 24px rgba(17, 24, 39, 0.08); white-space: pre-wrap;
   }
   .message-user {
-    justify-self: end; color: #ffffff; background: linear-gradient(135deg, var(--accent), var(--accent-dark));
+    justify-self: end; color: #03101e; background: linear-gradient(135deg, var(--accent), var(--accent-dark));
     border-bottom-right-radius: 6px;
   }
   .message-bot {
-    justify-self: start; background: #ffffff; border: 1px solid var(--line);
+    justify-self: start; background: rgba(255, 255, 255, 0.1); border: 1px solid var(--line);
     border-bottom-left-radius: 6px;
   }
   .message-meta { display: block; margin-bottom: 5px; color: rgba(255, 255, 255, 0.72); font-size: 0.74rem; font-weight: 800; }
@@ -522,18 +558,21 @@ _WEB_GUI_PAGE_TEMPLATE: Final[str] = """<!DOCTYPE html>
   .status-read_only { color: __COLOR_READ_ONLY__; }
   #command-form {
     display: flex; gap: 10px; padding: 16px; border-top: 1px solid var(--line);
-    background: rgba(255, 255, 255, 0.72);
+    background: rgba(7, 13, 34, 0.72);
   }
   #command-input {
     flex: 1; font-size: 1.02rem; padding: 14px 16px;
-    border: 1px solid rgba(96, 112, 128, 0.28); border-radius: 18px; background: #ffffff;
+    border: 1px solid rgba(136, 169, 255, 0.28); border-radius: 18px; background: rgba(255, 255, 255, 0.92); color: #071225;
   }
   #command-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.12); }
   #send-button {
     font-size: 1rem; font-weight: 900; padding: 12px 22px; border: none;
-    border-radius: 18px; background: var(--accent); color: #ffffff; cursor: pointer;
+    border-radius: 18px; background: linear-gradient(135deg, var(--accent), var(--violet)); color: #061126; cursor: pointer;
   }
-  #send-button:hover { background: var(--accent-dark); }
+  #send-button:disabled, #command-input:disabled {
+    opacity: 0.55; cursor: not-allowed;
+  }
+  #send-button:hover:not(:disabled) { filter: brightness(1.08); }
   @media (max-width: 980px) {
     body { padding: 12px; }
     .hero { display: block; }
@@ -551,49 +590,58 @@ _WEB_GUI_PAGE_TEMPLATE: Final[str] = """<!DOCTYPE html>
 </head>
 <body>
 <div class="app-shell">
+<nav class="language-switcher" aria-label="Language">
+  <button type="button" data-lang-button="ko" class="active">한국어</button>
+  <button type="button" data-lang-button="en">English</button>
+  <button type="button" data-lang-button="zh">中文</button>
+</nav>
 <header class="hero">
   <div>
-    <p class="eyebrow">Live RTS Command Center</p>
+    <p class="eyebrow" data-i18n="eyebrow">Live RTS Command Center</p>
     <h1>__TITLE__</h1>
-    <p class="hint">대화하듯 명령하고, 우측 대시보드에서 전장 상태를 확인하세요.</p>
+    <p class="hint" data-i18n="heroHint">대화하듯 명령하고, 우측 대시보드에서 전장 상태를 확인하세요.</p>
   </div>
-  <div class="connection-pill" id="connection-status">SC2 연결 확인 중</div>
+  <div class="connection-pill" id="connection-status" data-i18n="connectionChecking">SC2 연결 확인 중</div>
 </header>
 <main>
   <section id="command-panel" aria-label="대화형 명령 채팅">
     <div class="chat-header">
       <div>
-        <p class="chat-title">커맨더 채팅</p>
-        <p class="chat-subtitle">명령, 질문, 상태 확인을 한 창에서 처리합니다.</p>
+        <p class="chat-title" data-i18n="chatTitle">커맨더 채팅</p>
+        <p class="chat-subtitle" data-i18n="chatSubtitle">명령, 질문, 상태 확인을 한 창에서 처리합니다.</p>
       </div>
       <div class="quick-commands">
-        <button type="button" data-command="상태확인">상태확인</button>
-        <button type="button" data-command="정찰보내">정찰보내</button>
-        <button type="button" data-command="SCV 여러개 뽑아">SCV 생산</button>
-        <button type="button" data-command="건물 위치 지정 가능?">위치 질문</button>
+        <button type="button" data-command="상태확인" data-i18n="quickStatus">상태확인</button>
+        <button type="button" data-command="정찰보내" data-i18n="quickScout">정찰보내</button>
+        <button type="button" data-command="SCV 여러개 뽑아" data-i18n="quickScv">SCV 생산</button>
+        <button type="button" data-command="건물 위치 지정 가능?" data-i18n="quickPosition">위치 질문</button>
       </div>
     </div>
     <div id="log" aria-live="polite" role="log"></div>
     <form id="command-form">
       <input id="command-input" type="text" autocomplete="off" autofocus
              placeholder="대화하듯 입력하세요. 예: 보급고 지어 / 음성지원도 되나?">
-      <button type="submit" id="send-button">전송</button>
+      <button type="submit" id="send-button" data-i18n="send">전송</button>
     </form>
   </section>
   <aside id="state-panel">
-    <h2>전장 대시보드</h2>
+    <h2 data-i18n="dashboardTitle">전장 대시보드</h2>
     <dl class="dashboard-grid">
-      <div class="metric-card"><dt>미네랄</dt><dd id="state-minerals">-</dd></div>
-      <div class="metric-card"><dt>가스</dt><dd id="state-vespene">-</dd></div>
-      <div class="metric-card"><dt>보급</dt><dd id="state-supply">-</dd></div>
-      <div class="metric-card"><dt>일꾼</dt><dd id="state-workers">-</dd></div>
-      <div class="metric-card"><dt>병력</dt><dd id="state-army">-</dd></div>
-      <div class="metric-card wide-card"><dt>건물</dt><dd id="state-structures">-</dd></div>
+      <div class="metric-card"><dt data-i18n="minerals">미네랄</dt><dd id="state-minerals">-</dd></div>
+      <div class="metric-card"><dt data-i18n="vespene">가스</dt><dd id="state-vespene">-</dd></div>
+      <div class="metric-card"><dt data-i18n="supply">보급</dt><dd id="state-supply">-</dd></div>
+      <div class="metric-card"><dt data-i18n="workers">일꾼</dt><dd id="state-workers">-</dd></div>
+      <div class="metric-card"><dt data-i18n="army">병력</dt><dd id="state-army">-</dd></div>
+      <div class="metric-card wide-card"><dt data-i18n="structures">건물</dt><dd id="state-structures">-</dd></div>
     </dl>
     <p id="state-availability"></p>
+    <section id="briefing-panel">
+      <h2 data-i18n="briefingTitle">전략 브리핑</h2>
+      <p id="strategy-briefing" data-i18n="briefingWaiting">상태 데이터를 기다리는 중입니다.</p>
+    </section>
     <section id="llm-panel">
-      <h2>LLM 설정</h2>
-      <p class="hint">API 키는 이 로컬 프로세스 메모리에만 보관됩니다.</p>
+      <h2 data-i18n="llmTitle">LLM 설정</h2>
+      <p class="hint" data-i18n="llmHint">API 키는 이 로컬 프로세스 메모리에만 보관됩니다.</p>
       <form id="llm-form">
         <label for="llm-provider">Provider</label>
         <select id="llm-provider">
@@ -604,9 +652,9 @@ _WEB_GUI_PAGE_TEMPLATE: Final[str] = """<!DOCTYPE html>
         <input id="llm-model" type="text" autocomplete="off" placeholder="기본 모델 사용">
         <label for="llm-api-key">API Key</label>
         <input id="llm-api-key" type="password" autocomplete="off" placeholder="sk-...">
-        <button type="submit">로컬 키 설정</button>
+        <button type="submit" data-i18n="saveLlm">로컬 키 설정</button>
       </form>
-      <p id="llm-status">LLM 키 상태를 확인 중입니다.</p>
+      <p id="llm-status" data-i18n="llmChecking">LLM 키 상태를 확인 중입니다.</p>
     </section>
   </aside>
 </main>
@@ -619,6 +667,211 @@ var authQuery = token ? "?token=" + encodeURIComponent(token) : "";
 var authJoin = token ? "&token=" + encodeURIComponent(token) : "";
 var lastSeq = 0;
 var logBox = document.getElementById("log");
+var currentLang = "ko";
+var llmConfigured = false;
+var MAX_CHAT_EVENTS = 80;
+var trimmedChatEvents = 0;
+
+var I18N = {
+  ko: {
+    eyebrow: "Live RTS Command Center",
+    heroHint: "대화하듯 명령하고, 우측 대시보드에서 전장 상태를 확인하세요.",
+    connectionChecking: "SC2 연결 확인 중",
+    connectionWaiting: "SC2 상태 대기 중",
+    connectionReady: "SC2 연결됨",
+    chatTitle: "커맨더 채팅",
+    chatSubtitle: "명령, 질문, 상태 확인을 한 창에서 처리합니다.",
+    quickStatus: "상태확인",
+    quickScout: "정찰보내",
+    quickScv: "SCV 생산",
+    quickPosition: "위치 질문",
+    send: "전송",
+    dashboardTitle: "전장 대시보드",
+    minerals: "미네랄",
+    vespene: "가스",
+    supply: "보급",
+    workers: "일꾼",
+    army: "병력",
+    structures: "건물",
+    noState: "게임 상태를 아직 읽을 수 없습니다.",
+    noStructures: "없음",
+    incompleteObservation: "관측이 불완전합니다.",
+    briefingTitle: "전략 브리핑",
+    briefingWaiting: "상태 데이터를 기다리는 중입니다.",
+    briefingEconomy: "경제",
+    briefingSupply: "보급",
+    briefingForces: "전력",
+    briefingEnemy: "적 관측",
+    briefingEnemyNone: "발견된 적 없음",
+    briefingSuggestionSupply: "보급 여유가 낮습니다. 보급고를 준비하세요.",
+    briefingSuggestionScout: "적 정보가 없습니다. 정찰 명령을 고려하세요.",
+    briefingSuggestionArmy: "병력이 없습니다. 병영 이후 마린 생산을 준비하세요.",
+    briefingSuggestionStable: "즉시 위험 신호는 없습니다. 경제와 생산을 유지하세요.",
+    chatTrimmed: "이전 대화 일부 생략",
+    workerUnit: "기",
+    idleLabel: "유휴",
+    llmTitle: "LLM 설정",
+    llmHint: "API 키는 이 로컬 프로세스 메모리에만 보관됩니다.",
+    llmChecking: "LLM 키 상태를 확인 중입니다.",
+    llmReady: "LLM 키 설정됨",
+    llmMissing: "LLM 필수: API 키를 먼저 설정해야 명령을 보낼 수 있습니다.",
+    llmEnterKey: "API 키를 입력하세요.",
+    llmSaveFailed: "LLM 키 설정 요청에 실패했습니다.",
+    userLabel: "사용자",
+    commanderLabel: "커맨더",
+    commandPlaceholderReady: "대화하듯 입력하세요. 예: 보급고 지어 / 정찰보내",
+    commandPlaceholderLocked: "LLM 키 설정 후 명령 입력이 활성화됩니다.",
+    commandRejected: "LLM 키가 설정되지 않아 명령을 보내지 않았습니다.",
+    saveLlm: "로컬 키 설정"
+  },
+  en: {
+    eyebrow: "Live RTS Command Center",
+    heroHint: "Command conversationally and monitor the battlefield dashboard.",
+    connectionChecking: "Checking SC2 link",
+    connectionWaiting: "Waiting for SC2 state",
+    connectionReady: "SC2 connected",
+    chatTitle: "Commander Chat",
+    chatSubtitle: "Orders, questions, and status reports in one cockpit.",
+    quickStatus: "Status",
+    quickScout: "Scout",
+    quickScv: "Train SCV",
+    quickPosition: "Placement Help",
+    send: "Send",
+    dashboardTitle: "Battlefield Dashboard",
+    minerals: "Minerals",
+    vespene: "Vespene",
+    supply: "Supply",
+    workers: "Workers",
+    army: "Army",
+    structures: "Structures",
+    noState: "Game state is not available yet.",
+    noStructures: "None",
+    incompleteObservation: "Observation is incomplete.",
+    briefingTitle: "Strategy Briefing",
+    briefingWaiting: "Waiting for state data.",
+    briefingEconomy: "Economy",
+    briefingSupply: "Supply",
+    briefingForces: "Forces",
+    briefingEnemy: "Enemy intel",
+    briefingEnemyNone: "No enemy spotted",
+    briefingSuggestionSupply: "Supply is tight. Prepare another depot.",
+    briefingSuggestionScout: "Enemy intel is empty. Consider scouting.",
+    briefingSuggestionArmy: "You have no army. Prepare Marine production after Barracks.",
+    briefingSuggestionStable: "No immediate risk signal. Keep economy and production running.",
+    chatTrimmed: "Older chat omitted",
+    workerUnit: "",
+    idleLabel: "idle",
+    llmTitle: "LLM Settings",
+    llmHint: "The API key is stored only in this local process memory.",
+    llmChecking: "Checking LLM key status.",
+    llmReady: "LLM key configured",
+    llmMissing: "LLM required: configure an API key before sending commands.",
+    llmEnterKey: "Enter an API key.",
+    llmSaveFailed: "Failed to configure the LLM key.",
+    userLabel: "User",
+    commanderLabel: "Commander",
+    commandPlaceholderReady: "Type naturally. Example: build a supply depot / send scout",
+    commandPlaceholderLocked: "Command input unlocks after LLM key setup.",
+    commandRejected: "Command not sent because the LLM key is not configured.",
+    saveLlm: "Save Local Key"
+  },
+  zh: {
+    eyebrow: "实时 RTS 指挥中心",
+    heroHint: "像聊天一样下达命令，并在右侧查看战场仪表盘。",
+    connectionChecking: "正在检查 SC2 连接",
+    connectionWaiting: "等待 SC2 状态",
+    connectionReady: "SC2 已连接",
+    chatTitle: "指挥官聊天",
+    chatSubtitle: "命令、问题和状态报告集中在一个驾驶舱。",
+    quickStatus: "状态",
+    quickScout: "侦察",
+    quickScv: "生产 SCV",
+    quickPosition: "位置帮助",
+    send: "发送",
+    dashboardTitle: "战场仪表盘",
+    minerals: "晶体矿",
+    vespene: "瓦斯",
+    supply: "补给",
+    workers: "工人",
+    army: "部队",
+    structures: "建筑",
+    noState: "暂时无法读取游戏状态。",
+    noStructures: "无",
+    incompleteObservation: "侦测信息不完整。",
+    briefingTitle: "战略简报",
+    briefingWaiting: "正在等待状态数据。",
+    briefingEconomy: "经济",
+    briefingSupply: "补给",
+    briefingForces: "战力",
+    briefingEnemy: "敌情",
+    briefingEnemyNone: "未发现敌人",
+    briefingSuggestionSupply: "补给余量偏低。请准备补给站。",
+    briefingSuggestionScout: "缺少敌方情报。建议派出侦察。",
+    briefingSuggestionArmy: "当前没有部队。建造兵营后准备生产陆战队员。",
+    briefingSuggestionStable: "暂无明显危险信号。继续维持经济和生产。",
+    chatTrimmed: "已省略较早对话",
+    workerUnit: "",
+    idleLabel: "空闲",
+    llmTitle: "LLM 设置",
+    llmHint: "API key 只保存在本地进程内存中。",
+    llmChecking: "正在检查 LLM key 状态。",
+    llmReady: "LLM key 已设置",
+    llmMissing: "必须先设置 LLM API key 才能发送命令。",
+    llmEnterKey: "请输入 API key。",
+    llmSaveFailed: "LLM key 设置请求失败。",
+    userLabel: "用户",
+    commanderLabel: "指挥官",
+    commandPlaceholderReady: "自然输入命令。例如：建造补给站 / 派出侦察",
+    commandPlaceholderLocked: "设置 LLM key 后才能输入命令。",
+    commandRejected: "LLM key 未设置，命令未发送。",
+    saveLlm: "保存本地 Key"
+  }
+};
+
+function t(key) {
+  return (I18N[currentLang] && I18N[currentLang][key]) || I18N.ko[key] || key;
+}
+
+function setCommandEnabled(enabled) {
+  var input = document.getElementById("command-input");
+  var button = document.getElementById("send-button");
+  input.disabled = !enabled;
+  button.disabled = !enabled;
+  input.placeholder = enabled ? t("commandPlaceholderReady") : t("commandPlaceholderLocked");
+}
+
+function applyLanguage(lang) {
+  currentLang = I18N[lang] ? lang : "ko";
+  document.documentElement.lang = currentLang;
+  Array.prototype.forEach.call(document.querySelectorAll("[data-i18n]"), function (node) {
+    node.textContent = t(node.getAttribute("data-i18n"));
+  });
+  Array.prototype.forEach.call(document.querySelectorAll("[data-lang-button]"), function (button) {
+    button.classList.toggle("active", button.getAttribute("data-lang-button") === currentLang);
+  });
+  setCommandEnabled(llmConfigured);
+}
+
+function trimChatLog() {
+  while (logBox.querySelectorAll(".log-entry").length > MAX_CHAT_EVENTS) {
+    var oldestEntry = logBox.querySelector(".log-entry");
+    if (!oldestEntry) { break; }
+    logBox.removeChild(oldestEntry);
+    trimmedChatEvents += 1;
+  }
+  var existingNote = document.getElementById("chat-trim-note");
+  if (trimmedChatEvents < 1) {
+    if (existingNote) { existingNote.remove(); }
+    return;
+  }
+  if (!existingNote) {
+    existingNote = document.createElement("div");
+    existingNote.id = "chat-trim-note";
+    existingNote.className = "chat-trim-note";
+    logBox.insertBefore(existingNote, logBox.firstElementChild);
+  }
+  existingNote.textContent = t("chatTrimmed") + " · " + trimmedChatEvents;
+}
 
 function appendLog(ev) {
   var entry = document.createElement("div");
@@ -628,7 +881,7 @@ function appendLog(ev) {
     userMessage.className = "message message-user";
     var userMeta = document.createElement("span");
     userMeta.className = "message-meta";
-    userMeta.textContent = "사용자";
+    userMeta.textContent = t("userLabel");
     userMessage.appendChild(userMeta);
     userMessage.appendChild(document.createTextNode(ev.command_text));
     entry.appendChild(userMessage);
@@ -637,7 +890,7 @@ function appendLog(ev) {
   botMessage.className = "message message-bot";
   var botMeta = document.createElement("span");
   botMeta.className = "message-meta";
-  botMeta.textContent = "커맨더";
+  botMeta.textContent = t("commanderLabel");
   botMessage.appendChild(botMeta);
   var status = document.createElement("span");
   status.className = "status status-" + (ev.status || "clarification");
@@ -649,6 +902,7 @@ function appendLog(ev) {
   botMessage.appendChild(narration);
   entry.appendChild(botMessage);
   logBox.appendChild(entry);
+  trimChatLog();
   logBox.scrollTop = logBox.scrollHeight;
 }
 
@@ -670,26 +924,58 @@ function setText(id, value) {
 
 function renderState(data) {
   if (!data || data.available === false) {
-    setText("state-availability", "게임 상태를 아직 읽을 수 없습니다.");
-    setText("connection-status", "SC2 상태 대기 중");
+    setText("state-availability", t("noState"));
+    setText("connection-status", t("connectionWaiting"));
+    setText("strategy-briefing", t("briefingWaiting"));
     return;
   }
   setText("state-minerals", String(data.minerals));
   setText("state-vespene", String(data.vespene));
   setText("state-supply", data.supply_used + " / " + data.supply_cap);
   var workers = (data.own_units && data.own_units.SCV) || 0;
-  setText("state-workers", workers + "기 (유휴 " + (data.idle_worker_count || 0) + "기)");
-  setText("state-army", (data.army_count || 0) + "기");
+  setText("state-workers", workers + t("workerUnit") + " (" + t("idleLabel") + " " + (data.idle_worker_count || 0) + t("workerUnit") + ")");
+  setText("state-army", (data.army_count || 0) + t("workerUnit"));
   var structures = data.own_structures || {};
   var parts = Object.keys(structures).map(function (name) {
     return name + " " + structures[name];
   });
-  setText("state-structures", parts.length ? parts.join(", ") : "없음");
+  setText("state-structures", parts.length ? parts.join(", ") : t("noStructures"));
   setText(
     "state-availability",
-    data.observation_complete === false ? "관측이 불완전합니다." : ""
+    data.observation_complete === false ? t("incompleteObservation") : ""
   );
-  setText("connection-status", "SC2 연결됨 · " + Math.floor(data.game_time_seconds || 0) + "초");
+  setText("connection-status", t("connectionReady") + " · " + Math.floor(data.game_time_seconds || 0) + "s");
+  renderStrategyBriefing(data);
+}
+
+function sumValues(source) {
+  if (!source) { return 0; }
+  return Object.keys(source).reduce(function (total, key) {
+    var value = Number(source[key] || 0);
+    return total + (Number.isFinite(value) ? value : 0);
+  }, 0);
+}
+
+function renderStrategyBriefing(data) {
+  var workers = (data.own_units && data.own_units.SCV) || 0;
+  var enemyUnits = sumValues(data.visible_enemy_units);
+  var enemyStructures = sumValues(data.visible_enemy_structures);
+  var suggestions = [];
+  if ((data.supply_left || 0) <= 2) { suggestions.push(t("briefingSuggestionSupply")); }
+  if (enemyUnits + enemyStructures === 0) { suggestions.push(t("briefingSuggestionScout")); }
+  if ((data.army_count || 0) === 0) { suggestions.push(t("briefingSuggestionArmy")); }
+  if (!suggestions.length) { suggestions.push(t("briefingSuggestionStable")); }
+  var enemyLine = enemyUnits + enemyStructures > 0
+    ? enemyUnits + " / " + enemyStructures
+    : t("briefingEnemyNone");
+  setText(
+    "strategy-briefing",
+    t("briefingEconomy") + ": " + data.minerals + "M / " + data.vespene + "G, " + workers + t("workerUnit") + "\n" +
+    t("briefingSupply") + ": " + data.supply_used + "/" + data.supply_cap + " (" + (data.supply_left || 0) + ")\n" +
+    t("briefingForces") + ": " + (data.army_count || 0) + t("workerUnit") + "\n" +
+    t("briefingEnemy") + ": " + enemyLine + "\n" +
+    suggestions.join("\n")
+  );
 }
 
 function pollState() {
@@ -705,11 +991,13 @@ function renderLlmSettings(data) {
     document.getElementById("llm-provider").value = data.provider;
   }
   document.getElementById("llm-model").value = data.model || "";
+  llmConfigured = !!data.configured;
+  setCommandEnabled(llmConfigured);
   setText(
     "llm-status",
     data.configured
-      ? "LLM 키 설정됨 (" + data.provider + " / " + data.model + ")"
-      : "LLM 키 미설정: 이 브라우저에서 API 키를 입력하세요."
+      ? t("llmReady") + " (" + data.provider + " / " + data.model + ")"
+      : t("llmMissing")
   );
 }
 
@@ -725,6 +1013,10 @@ document.getElementById("command-form").addEventListener("submit", function (eve
   var input = document.getElementById("command-input");
   var text = input.value.trim();
   if (!text) { return; }
+  if (!llmConfigured) {
+    setText("llm-status", t("commandRejected"));
+    return;
+  }
   fetch("/api/command" + authQuery, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -751,7 +1043,7 @@ document.getElementById("llm-form").addEventListener("submit", function (event) 
     api_key: keyInput.value.trim()
   };
   if (!payload.api_key) {
-    setText("llm-status", "API 키를 입력하세요.");
+    setText("llm-status", t("llmEnterKey"));
     return;
   }
   fetch("/api/llm" + authQuery, {
@@ -767,11 +1059,20 @@ document.getElementById("llm-form").addEventListener("submit", function (event) 
       }
       renderLlmSettings(data);
     })
-    .catch(function () { setText("llm-status", "LLM 키 설정 요청에 실패했습니다."); });
+    .catch(function () { setText("llm-status", t("llmSaveFailed")); });
+});
+
+Array.prototype.forEach.call(document.querySelectorAll("[data-lang-button]"), function (button) {
+  button.addEventListener("click", function () {
+    applyLanguage(button.getAttribute("data-lang-button") || "ko");
+    pollState();
+    pollLlmSettings();
+  });
 });
 
 setInterval(pollHistory, POLL_INTERVAL_MS);
 setInterval(pollState, POLL_INTERVAL_MS);
+applyLanguage("ko");
 pollHistory();
 pollState();
 pollLlmSettings();
@@ -934,6 +1235,17 @@ class _WebGuiRequestHandler(BaseHTTPRequestHandler):
             self._send_command_rejection(
                 "text 필드는 비어 있지 않은 문자열이어야 합니다. "
                 "예: 마린 6기 입구로 보내고 SCV 계속 찍어"
+            )
+            return
+        try:
+            llm_snapshot = dict(self._bridge.llm_settings_snapshot())
+        except Exception as error:  # noqa: BLE001 - surfaced honestly as 500.
+            self._send_internal_error(error)
+            return
+        if not bool(llm_snapshot.get("configured")):
+            self._send_json(
+                HTTPStatus.CONFLICT,
+                {"accepted": False, "error": LLM_REQUIRED_COMMAND_ERROR},
             )
             return
         try:

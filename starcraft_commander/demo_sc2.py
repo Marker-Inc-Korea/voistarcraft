@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import time
 from collections.abc import Mapping, Sequence
 from types import SimpleNamespace
@@ -56,6 +57,7 @@ from starcraft_commander.llm_interpreter import (
     DEFAULT_OPENAI_MODEL,
     HybridCommandInterpreter,
     LocalLLMControl,
+    OPENAI_API_KEY_ENV_VAR,
     build_hybrid_interpreter,
 )
 from starcraft_commander.python_sc2_adapter import PythonSC2BotAdapter
@@ -322,16 +324,30 @@ def build_llm_interpreter() -> HybridCommandInterpreter:
 
 
 def build_local_llm_control(provider: str, model: str) -> LocalLLMControl:
-    """Build process-local LLM control for web-supplied API keys."""
+    """Build required process-local LLM control from environment credentials."""
 
     normalized = provider.strip().lower()
     if normalized in {"openai", "gpt", "chatgpt"}:
         require_openai()
+        env_var = OPENAI_API_KEY_ENV_VAR
     elif normalized == "anthropic":
         require_anthropic()
+        env_var = ANTHROPIC_API_KEY_ENV_VAR
     else:
         raise MissingLLMDependencyError("LLM provider must be 'openai' or 'anthropic'.")
-    return LocalLLMControl(provider=normalized, model=model)
+    api_key = os.environ.get(env_var, "").strip()
+    if not api_key:
+        raise MissingLLMDependencyError(
+            f"{env_var} is not set. Live StarCraft II control now requires "
+            "a configured LLM before the game starts. Export a valid key first: "
+            f"export {env_var}=... "
+            f"{env_var} 환경 변수가 설정되어 있지 않습니다. 이제 실제 StarCraft II "
+            "제어는 LLM 연결이 먼저 필요합니다. 실행 전에 유효한 키를 설정하세요: "
+            f"export {env_var}=..."
+        )
+    control = LocalLLMControl(provider=normalized, model=model)
+    control.configure(normalized, api_key, model)
+    return control
 
 
 def build_dry_run_session(
@@ -812,8 +828,8 @@ def run_live(args: argparse.Namespace) -> None:
     """
 
     require_python_sc2()
-    # Provider SDK must exist before the match starts; the key itself can be
-    # supplied later through the localhost web GUI and stays process-local.
+    # Provider SDK and key must both exist before the match starts. The GUI can
+    # rotate the process-local key later, but cannot bypass startup preflight.
     llm_control = build_local_llm_control(args.llm_provider, args.llm_model)
     interpreter = HybridCommandInterpreter(llm_interpreter=llm_control)
     if args.voice:

@@ -54,8 +54,10 @@ voice), the system interprets it and maps it to StarCraft II API actions.
     LLM fallback only on unsupported/ambiguous; LLM failure → existing
     Korean clarification.
   - OpenAI/GPT is the default local GUI provider (`gpt-4.1-mini`), with
-    Anthropic still supported. Keys can come from local env vars or the
-    localhost web GUI; web-entered keys stay in process memory.
+    Anthropic still supported. Live startup requires the selected key in local
+    env (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`); the localhost web GUI can
+    rotate the running process key, and web-entered keys stay in process
+    memory.
 - [x] **W2. Event memory** (`starcraft_commander/event_memory.py` +
   `tests/test_event_memory.py`) — thread-safe ring buffer of command
   outcomes with game time; feeds GUI history.
