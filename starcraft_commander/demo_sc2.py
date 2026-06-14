@@ -52,13 +52,17 @@ from starcraft_commander.event_memory import CommanderEventMemory
 from starcraft_commander.live_pipeline import SC2CommandOutcome, SC2CommandSession
 from starcraft_commander.llm_interpreter import (
     ANTHROPIC_API_KEY_ENV_VAR,
+    DEFAULT_LLM_PROVIDER,
+    DEFAULT_OPENAI_MODEL,
     HybridCommandInterpreter,
+    LocalLLMControl,
     build_hybrid_interpreter,
 )
 from starcraft_commander.python_sc2_adapter import PythonSC2BotAdapter
 from starcraft_commander.runtime_deps import (
     MissingLLMDependencyError,
     require_anthropic,
+    require_openai,
     require_faster_whisper,
     require_python_sc2,
     require_sounddevice,
@@ -317,6 +321,19 @@ def build_llm_interpreter() -> HybridCommandInterpreter:
     return hybrid
 
 
+def build_local_llm_control(provider: str, model: str) -> LocalLLMControl:
+    """Build process-local LLM control for web-supplied API keys."""
+
+    normalized = provider.strip().lower()
+    if normalized in {"openai", "gpt", "chatgpt"}:
+        require_openai()
+    elif normalized == "anthropic":
+        require_anthropic()
+    else:
+        raise MissingLLMDependencyError("LLM provider must be 'openai' or 'anthropic'.")
+    return LocalLLMControl(provider=normalized, model=model)
+
+
 def build_dry_run_session(
     interpreter: object | None = None,
 ) -> tuple[SC2CommandSession, DemoFakeBotAI]:
@@ -411,12 +428,14 @@ class CommanderGameBridge:
         command_queue: "asyncio.Queue[str]",
         event_memory: CommanderEventMemory,
         state_resolver: SC2StateResolverInterface = DEFAULT_SC2_STATE_RESOLVER,
+        llm_control: LocalLLMControl | None = None,
     ) -> None:
         self._bot = bot
         self._loop = loop
         self._queue = command_queue
         self._event_memory = event_memory
         self._state_resolver = state_resolver
+        self._llm_control = llm_control
 
     def submit_command(self, text: str) -> None:
         """Enqueue one browser utterance into the on_step command queue."""
@@ -450,6 +469,23 @@ class CommanderGameBridge:
         """Return the shared memory's highest assigned sequence number."""
 
         return int(self._event_memory.latest_seq())
+
+    def llm_settings_snapshot(self) -> Mapping[str, object]:
+        control = self._llm_control
+        if control is None:
+            return {"provider": "", "model": "", "configured": False, "key_present": False}
+        return dict(control.snapshot())
+
+    def configure_llm(
+        self,
+        provider: str,
+        api_key: str,
+        model: str = "",
+    ) -> Mapping[str, object]:
+        control = self._llm_control
+        if control is None:
+            raise RuntimeError("이 세션은 웹 LLM 키 설정을 지원하지 않습니다.")
+        return dict(control.configure(provider, api_key, model))
 
 
 def render_outcome_lines(outcome: SC2CommandOutcome) -> tuple[str, ...]:
@@ -540,6 +576,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
         dest="llm",
         action="store_false",
         help="dry-run/testing only: use deterministic rules without the LLM stage",
+    )
+    parser.add_argument(
+        "--llm-provider",
+        default=DEFAULT_LLM_PROVIDER,
+        choices=("openai", "anthropic"),
+        help="LLM provider for live/web API key settings (default: openai)",
+    )
+    parser.add_argument(
+        "--llm-model",
+        default=DEFAULT_OPENAI_MODEL,
+        help="LLM model for live/web API key settings",
     )
     parser.add_argument(
         "--gui",
@@ -765,9 +812,10 @@ def run_live(args: argparse.Namespace) -> None:
     """
 
     require_python_sc2()
-    # Fail fast with the actionable bilingual hints instead of letting a
-    # missing optional dependency surface mid-game inside the loop.
-    interpreter = build_llm_interpreter()
+    # Provider SDK must exist before the match starts; the key itself can be
+    # supplied later through the localhost web GUI and stays process-local.
+    llm_control = build_local_llm_control(args.llm_provider, args.llm_model)
+    interpreter = HybridCommandInterpreter(llm_interpreter=llm_control)
     if args.voice:
         require_faster_whisper()
         require_sounddevice()
@@ -825,6 +873,7 @@ def run_live(args: argparse.Namespace) -> None:
                 loop=loop,
                 command_queue=self.command_queue,
                 event_memory=self.event_memory,
+                llm_control=llm_control,
             )
             server = WebGuiServer(
                 bridge=bridge,

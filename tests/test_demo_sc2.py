@@ -341,16 +341,20 @@ class RunLiveWiringTest(unittest.TestCase):
 
         modules = build_fake_sc2_modules(fake_run_game)
         buffer = io.StringIO()
-        llm_builder = mock.Mock(return_value=None)
+        llm_control = mock.Mock()
         with mock.patch.dict(sys.modules, modules):
-            with mock.patch.object(demo_sc2, "build_llm_interpreter", llm_builder):
+            with mock.patch.object(
+                demo_sc2,
+                "build_local_llm_control",
+                mock.Mock(return_value=llm_control),
+            ) as llm_builder:
                 with contextlib.redirect_stdout(buffer):
                     demo_sc2.run_live(
                         demo_sc2.parse_args(
                             ["--map", "TestMapLE", "--difficulty", "hard"]
                         )
                     )
-        llm_builder.assert_called_once_with()
+        llm_builder.assert_called_once_with("openai", demo_sc2.DEFAULT_OPENAI_MODEL)
         self.assertEqual(("MAP", "TestMapLE"), captured["map"])
         self.assertTrue(captured["realtime"])
         bot_player, computer_player = captured["players"]

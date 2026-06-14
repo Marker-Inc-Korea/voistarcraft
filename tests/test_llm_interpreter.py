@@ -7,6 +7,7 @@ blocks). Package/key absence and presence are simulated by patching
 ``sys.modules`` and ``os.environ``.
 """
 
+import json
 import os
 import sys
 import types
@@ -112,10 +113,49 @@ class FakeAnthropicClient:
         self.messages = _FakeMessagesNamespace(self)
 
 
+class _FakeOpenAICompletionsNamespace:
+    def __init__(self, client):
+        self._client = client
+
+    def create(self, **kwargs):
+        self._client.calls.append(kwargs)
+        return self._client.outcome
+
+
+class _FakeOpenAIChatNamespace:
+    def __init__(self, client):
+        self.completions = _FakeOpenAICompletionsNamespace(client)
+
+
+class FakeOpenAIClient:
+    def __init__(self, outcome):
+        self.outcome = outcome
+        self.calls = []
+        self.chat = _FakeOpenAIChatNamespace(self)
+
+
 def _tool_response(input_payload):
     """Build a scripted response carrying one tool_use block."""
 
     return FakeMessage([FakeTextBlock("ok"), FakeToolUseBlock(input_payload)])
+
+
+def _openai_tool_response(input_payload):
+    return {
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "arguments": json.dumps(input_payload),
+                            }
+                        }
+                    ]
+                }
+            }
+        ]
+    }
 
 
 def _make_llm_interpreter(*outcomes):
@@ -260,6 +300,24 @@ class LLMCommandInterpreterResolveTest(unittest.TestCase):
             call["messages"],
             [{"role": "user", "content": FREE_FORM_DEFEND_UTTERANCE}],
         )
+
+    def test_openai_tool_call_arguments_resolve_to_typed_payload(self) -> None:
+        fake_client = FakeOpenAIClient(_openai_tool_response(DEFEND_TOOL_INPUT))
+        interpreter = LLMCommandInterpreter(
+            provider="openai",
+            model="gpt-test",
+            client_factory=lambda: fake_client,
+        )
+
+        result = interpreter.interpret(FREE_FORM_DEFEND_UTTERANCE)
+
+        self.assertIsInstance(result.payload, DefendIntent)
+        call = fake_client.calls[0]
+        self.assertEqual(call["model"], "gpt-test")
+        self.assertEqual(call["tool_choice"]["type"], "function")
+        self.assertEqual(call["tools"][0]["type"], "function")
+        self.assertEqual(call["messages"][0]["role"], "system")
+        self.assertEqual(call["messages"][1]["content"], FREE_FORM_DEFEND_UTTERANCE)
 
     def test_missing_priority_and_constraints_default_safely(self) -> None:
         interpreter, _fake_client = _make_llm_interpreter(
@@ -470,6 +528,22 @@ class HybridCommandInterpreterTest(unittest.TestCase):
         self.assertEqual(result.reason, UNSUPPORTED_COMMAND_CLARIFICATION_REASON)
         self.assertNotIn(distinctive_llm_reason, result.reason)
         self.assertEqual(len(fake_client.calls), 1)
+
+    def test_api_failure_is_surfaced_for_live_debuggability(self) -> None:
+        llm_interpreter, _fake_client = _make_llm_interpreter(
+            RuntimeError("model not found")
+        )
+        hybrid = HybridCommandInterpreter(llm_interpreter=llm_interpreter)
+
+        result = hybrid.interpret(FREE_FORM_DEFEND_UTTERANCE)
+
+        self.assertIsNone(result.payload)
+        self.assertTrue(result.clarification_required)
+        self.assertIn("LLM 해석에 실패", result.clarification_prompt)
+        self.assertEqual(
+            result.failure.primary_reason.code,
+            LLM_INTERPRETATION_FAILURE_CODE,
+        )
 
     def test_missing_or_unavailable_llm_returns_rule_result(self) -> None:
         unavailable_llm = LLMCommandInterpreter()

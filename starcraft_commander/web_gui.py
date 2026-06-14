@@ -102,6 +102,12 @@ class WebGuiBridgeInterface(Protocol):
     def latest_seq(self) -> int:
         """Return the highest recorded event sequence number (0 when empty)."""
 
+    def llm_settings_snapshot(self) -> Mapping[str, object]:
+        """Return safe LLM setting metadata, never the API key."""
+
+    def configure_llm(self, provider: str, api_key: str, model: str = "") -> Mapping[str, object]:
+        """Configure local process-memory LLM credentials."""
+
 
 class _SimpleHistory:
     """Minimal thread-safe in-memory outcome history store.
@@ -161,6 +167,7 @@ class SessionLoopBridge:
         session: object,
         history: object | None = None,
         state_resolver: SC2StateResolverInterface = DEFAULT_SC2_STATE_RESOLVER,
+        llm_control: object | None = None,
     ) -> None:
         if not callable(getattr(session, "process_text", None)):
             raise TypeError("Session loop bridge session must implement process_text().")
@@ -175,6 +182,7 @@ class SessionLoopBridge:
         self._session = session
         self._history = store
         self._state_resolver = state_resolver
+        self._llm_control = llm_control
         self._lifecycle_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -269,6 +277,20 @@ class SessionLoopBridge:
         """Return the history store's highest sequence number."""
 
         return int(self._history.latest_seq())
+
+    def llm_settings_snapshot(self) -> Mapping[str, object]:
+        control = self._llm_control
+        snapshot = getattr(control, "snapshot", None)
+        if callable(snapshot):
+            return dict(snapshot())
+        return {"provider": "", "model": "", "configured": False, "key_present": False}
+
+    def configure_llm(self, provider: str, api_key: str, model: str = "") -> Mapping[str, object]:
+        control = self._llm_control
+        configure = getattr(control, "configure", None)
+        if not callable(configure):
+            raise RuntimeError("이 세션은 웹 LLM 키 설정을 지원하지 않습니다.")
+        return dict(configure(provider, api_key, model))
 
     def _run_loop(self) -> None:
         """Daemon thread body: run a private asyncio loop draining commands."""
@@ -393,6 +415,18 @@ _WEB_GUI_PAGE_TEMPLATE: Final[str] = """<!DOCTYPE html>
   #state-panel dt { font-weight: 600; color: #44505c; }
   #state-panel dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
   #state-availability { margin: 10px 0 0; font-size: 0.8rem; color: #8a939c; }
+  #llm-panel {
+    margin-top: 16px; padding-top: 14px; border-top: 1px solid #e1e6eb;
+  }
+  #llm-panel label { display: block; margin: 8px 0 4px; font-size: 0.82rem; font-weight: 700; color: #44505c; }
+  #llm-panel select, #llm-panel input {
+    width: 100%; padding: 8px 10px; border: 1px solid #b9c5d0; border-radius: 6px;
+  }
+  #llm-panel button {
+    width: 100%; margin-top: 10px; padding: 9px 10px; border: none; border-radius: 6px;
+    background: #20262c; color: #ffffff; font-weight: 700; cursor: pointer;
+  }
+  #llm-status { margin: 8px 0 0; font-size: 0.78rem; color: #5b6570; }
   #log {
     flex: 1; min-height: 320px; max-height: 60vh; overflow-y: auto;
     background: #ffffff; border: 1px solid #d6dde4; border-radius: 8px;
@@ -443,6 +477,23 @@ _WEB_GUI_PAGE_TEMPLATE: Final[str] = """<!DOCTYPE html>
       <dt>건물</dt><dd id="state-structures">-</dd>
     </dl>
     <p id="state-availability"></p>
+    <section id="llm-panel">
+      <h2>LLM 설정</h2>
+      <p class="hint">API 키는 이 로컬 프로세스 메모리에만 보관됩니다.</p>
+      <form id="llm-form">
+        <label for="llm-provider">Provider</label>
+        <select id="llm-provider">
+          <option value="openai">OpenAI / GPT</option>
+          <option value="anthropic">Anthropic / Claude</option>
+        </select>
+        <label for="llm-model">Model</label>
+        <input id="llm-model" type="text" autocomplete="off" placeholder="기본 모델 사용">
+        <label for="llm-api-key">API Key</label>
+        <input id="llm-api-key" type="password" autocomplete="off" placeholder="sk-...">
+        <button type="submit">로컬 키 설정</button>
+      </form>
+      <p id="llm-status">LLM 키 상태를 확인 중입니다.</p>
+    </section>
   </aside>
 </main>
 <script>
@@ -520,6 +571,27 @@ function pollState() {
     .catch(function () { /* 다음 폴링에서 다시 시도합니다. */ });
 }
 
+function renderLlmSettings(data) {
+  if (!data) { return; }
+  if (data.provider) {
+    document.getElementById("llm-provider").value = data.provider;
+  }
+  document.getElementById("llm-model").value = data.model || "";
+  setText(
+    "llm-status",
+    data.configured
+      ? "LLM 키 설정됨 (" + data.provider + " / " + data.model + ")"
+      : "LLM 키 미설정: 이 브라우저에서 API 키를 입력하세요."
+  );
+}
+
+function pollLlmSettings() {
+  fetch("/api/llm" + authQuery)
+    .then(function (response) { return response.json(); })
+    .then(renderLlmSettings)
+    .catch(function () {});
+}
+
 document.getElementById("command-form").addEventListener("submit", function (event) {
   event.preventDefault();
   var input = document.getElementById("command-input");
@@ -534,10 +606,39 @@ document.getElementById("command-form").addEventListener("submit", function (eve
   input.focus();
 });
 
+document.getElementById("llm-form").addEventListener("submit", function (event) {
+  event.preventDefault();
+  var keyInput = document.getElementById("llm-api-key");
+  var payload = {
+    provider: document.getElementById("llm-provider").value,
+    model: document.getElementById("llm-model").value.trim(),
+    api_key: keyInput.value.trim()
+  };
+  if (!payload.api_key) {
+    setText("llm-status", "API 키를 입력하세요.");
+    return;
+  }
+  fetch("/api/llm" + authQuery, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  }).then(function (response) { return response.json(); })
+    .then(function (data) {
+      keyInput.value = "";
+      if (data.error) {
+        setText("llm-status", data.error);
+        return;
+      }
+      renderLlmSettings(data);
+    })
+    .catch(function () { setText("llm-status", "LLM 키 설정 요청에 실패했습니다."); });
+});
+
 setInterval(pollHistory, POLL_INTERVAL_MS);
 setInterval(pollState, POLL_INTERVAL_MS);
 pollHistory();
 pollState();
+pollLlmSettings();
 </script>
 </body>
 </html>
@@ -606,6 +707,9 @@ class _WebGuiRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/history":
             self._handle_history()
             return
+        if path == "/api/llm":
+            self._handle_llm_status()
+            return
         self._send_not_found()
 
     def do_POST(self) -> None:  # noqa: N802 - http.server contract.
@@ -616,6 +720,9 @@ class _WebGuiRequestHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path == "/api/command":
             self._handle_command()
+            return
+        if path == "/api/llm":
+            self._handle_llm_configure()
             return
         # Drain any request body so a keep-alive connection stays usable.
         self._read_request_body()
@@ -712,6 +819,47 @@ class _WebGuiRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(HTTPStatus.ACCEPTED, {"accepted": True})
 
+    def _handle_llm_status(self) -> None:
+        try:
+            self._send_json(HTTPStatus.OK, dict(self._bridge.llm_settings_snapshot()))
+        except Exception as error:  # noqa: BLE001 - surfaced honestly.
+            self._send_internal_error(error)
+
+    def _handle_llm_configure(self) -> None:
+        body = self._read_request_body()
+        if body is None:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"configured": False, "error": "LLM 설정 JSON 본문을 읽을 수 없습니다."},
+            )
+            return
+        try:
+            document = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"configured": False, "error": "LLM 설정 본문이 올바른 JSON이 아닙니다."},
+            )
+            return
+        if not isinstance(document, Mapping):
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"configured": False, "error": "LLM 설정 본문은 JSON 객체여야 합니다."},
+            )
+            return
+        provider = str(document.get("provider", "") or "")
+        api_key = str(document.get("api_key", "") or "")
+        model = str(document.get("model", "") or "")
+        try:
+            snapshot = self._bridge.configure_llm(provider, api_key, model)
+        except Exception as error:  # noqa: BLE001 - user-facing config failure.
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"configured": False, "error": str(error)},
+            )
+            return
+        self._send_json(HTTPStatus.OK, dict(snapshot))
+
     def _read_request_body(self) -> bytes | None:
         """Read the request body; ``None`` marks malformed/oversized input."""
 
@@ -744,7 +892,8 @@ class _WebGuiRequestHandler(BaseHTTPRequestHandler):
                 "error": (
                     f"지원하지 않는 경로입니다: {urlsplit(self.path).path}. "
                     "사용 가능한 경로: GET /, GET /api/state, "
-                    "GET /api/history?after=N, POST /api/command."
+                    "GET /api/history?after=N, GET/POST /api/llm, "
+                    "POST /api/command."
                 )
             },
         )

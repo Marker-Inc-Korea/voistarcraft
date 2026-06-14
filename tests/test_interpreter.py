@@ -1431,6 +1431,28 @@ class KoreanInterpreterMappingTest(unittest.TestCase):
             payload,
         )
 
+    def test_supply_depot_build_phrasings_resolve_without_ambiguity(self) -> None:
+        cases = (
+            "scv로 보급고 설치해",
+            "보급고 지어",
+            "보급고 건설해",
+        )
+
+        for command_text in cases:
+            with self.subTest(command_text=command_text):
+                result = interpret_command(command_text)
+
+                self.assertFalse(result.clarification_required)
+                self.assertEqual(
+                    BuildStructureIntent(
+                        priority="normal",
+                        constraints=(BUILD_STRUCTURE_CONSTRAINT,),
+                        structure="Supply Depot",
+                        location="main ramp",
+                    ),
+                    result.payload,
+                )
+
     def test_build_structure_heuristic_maps_nearby_korean_free_utterance(
         self,
     ) -> None:
@@ -1511,6 +1533,19 @@ class KoreanInterpreterMappingTest(unittest.TestCase):
             payload,
         )
 
+    def test_plain_scout_command_resolves_to_default_scout_order(self) -> None:
+        payload = interpret_command_text("정찰보내")
+
+        self.assertEqual(
+            ScoutIntent(
+                priority="normal",
+                constraints=(SEND_SCOUT_CONSTRAINT,),
+                target=SEND_SCOUT_DEFAULT_TARGET,
+                unit_group=SEND_SCOUT_DEFAULT_UNIT_GROUP,
+            ),
+            payload,
+        )
+
     def test_defend_ramp_heuristic_maps_nearby_korean_free_utterance(self) -> None:
         payload = interpret_command_text("초반 저글링 압박 오니까 본진 입구 빨리 막아")
 
@@ -1576,12 +1611,21 @@ class KoreanInterpreterMappingTest(unittest.TestCase):
                 validation = validate_intent_payload(payload.to_dict())
                 self.assertTrue(validation.executable)
 
-    def test_send_verb_without_ramp_word_never_becomes_defend(self) -> None:
+    def test_send_verb_without_ramp_word_resolves_to_scout_not_defend(self) -> None:
         # The movement verbs added for ramp defense must not capture scout or
         # gather phrasing that carries no ramp location word.
         result = interpret_command("정찰 보내")
 
-        self.assertIsNone(result.payload)
+        self.assertEqual(
+            ScoutIntent(
+                priority="normal",
+                constraints=(SEND_SCOUT_CONSTRAINT,),
+                target=SEND_SCOUT_DEFAULT_TARGET,
+                unit_group=SEND_SCOUT_DEFAULT_UNIT_GROUP,
+            ),
+            result.payload,
+        )
+        self.assertFalse(result.clarification_required)
         for candidate in result.candidates:
             self.assertNotEqual("DEFEND", candidate.intent)
 
@@ -1645,6 +1689,7 @@ class KoreanInterpreterMappingTest(unittest.TestCase):
             "SCV 하나 뽑아": 1,
             "SCV 두 기 찍어": 2,
             "일꾼 3기 생산해": 3,
+            "scv 여러개 뽑아": 3,
         }
         for command_text, expected_count in cases.items():
             with self.subTest(command_text=command_text):
@@ -1795,6 +1840,31 @@ class KoreanInterpreterMappingTest(unittest.TestCase):
             SummarizeStateIntent(
                 priority="normal",
                 constraints=(SUMMARIZE_STATE_CONSTRAINT,),
+            ),
+            payload,
+        )
+
+    def test_compact_state_check_command_resolves_to_summary(self) -> None:
+        payload = interpret_command_text("상태확인")
+
+        self.assertEqual(
+            SummarizeStateIntent(
+                priority="normal",
+                constraints=(SUMMARIZE_STATE_CONSTRAINT,),
+            ),
+            payload,
+        )
+
+    def test_compact_resource_gather_command_resolves_to_minerals(self) -> None:
+        payload = interpret_command_text("자원채취")
+
+        self.assertEqual(
+            GatherResourceIntent(
+                priority="normal",
+                constraints=(GATHER_RESOURCE_CONSTRAINT,),
+                resource="minerals",
+                worker_count=3,
+                base="main",
             ),
             payload,
         )

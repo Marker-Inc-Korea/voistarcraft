@@ -404,8 +404,7 @@ class LivePipelineTest(unittest.IsolatedAsyncioTestCase):
     async def test_same_family_compound_command_never_drops_second_part(self) -> None:
         # "마린 두 기 뽑고 정찰 보내" used to resolve the WHOLE text to one
         # TRAIN_ARMY payload, silently dropping the scout order. The scout
-        # half must surface (here as an honest clarification: bare "정찰
-        # 보내" carries no scout target context).
+        # half must surface and now resolves to the default enemy-front scout.
         bot = LivePipelineFakeBot()
         session = make_session(bot)
 
@@ -418,7 +417,8 @@ class LivePipelineTest(unittest.IsolatedAsyncioTestCase):
         # No Barracks on the fake bot: the train part blocks honestly.
         self.assertEqual("blocked", train_part.status)
         self.assertEqual("정찰 보내", scout_part.command_text)
-        self.assertEqual("clarification", scout_part.status)
+        self.assertEqual("SCOUT", scout_part.intent_dsl["intent"])
+        self.assertEqual("executed", scout_part.status)
 
     async def test_same_family_compound_with_resolvable_parts_executes_both(self) -> None:
         bot = LivePipelineFakeBot()

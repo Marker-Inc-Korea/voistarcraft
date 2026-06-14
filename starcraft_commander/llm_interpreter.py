@@ -2,30 +2,35 @@
 
 The rule-based ToyCraft interpreter resolves the supported Korean command
 families deterministically. This module adds the original plan's LLM
-interpreter stage for everything the rules cannot handle: one Anthropic
-``messages.create`` call per *user utterance* (never per game frame) with a
-single forced tool whose input schema is generated from ``INTENT_SCHEMAS``.
+interpreter stage for everything the rules cannot handle: one provider SDK
+call per *user utterance* (never per game frame) with a single forced tool
+whose input schema is generated from ``INTENT_SCHEMAS``.
 Every LLM answer passes the exact same typed ``validate_intent_payload``
 gate as rule output, so the LLM can never inject an out-of-vocabulary
 command. Any LLM problem (missing dependency, missing key, API error,
 timeout, malformed tool output, validation failure) degrades to a Korean
 clarification result and never raises.
 
-The module imports with zero optional dependencies; the ``anthropic`` SDK is
-imported lazily through :mod:`starcraft_commander.runtime_deps` only when a
-real client must be built.
+The module imports with zero optional dependencies; provider SDKs are imported
+lazily through :mod:`starcraft_commander.runtime_deps` only when a real client
+must be built.
 """
 
 from __future__ import annotations
 
+import json
 import os
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Final
 
 from starcraft_commander.runtime_deps import (
+    MissingLLMDependencyError,
     is_anthropic_available,
+    is_openai_available,
     require_anthropic,
+    require_openai,
 )
 from toycraft_commander.failure import build_parsing_failure_report
 from toycraft_commander.intents import (
@@ -53,10 +58,15 @@ from toycraft_commander.interpreter import (
 
 __all__ = [
     "ANTHROPIC_API_KEY_ENV_VAR",
+    "OPENAI_API_KEY_ENV_VAR",
+    "DEFAULT_ANTHROPIC_MODEL",
     "DEFAULT_LLM_MAX_TOKENS",
     "DEFAULT_LLM_MODEL",
+    "DEFAULT_LLM_PROVIDER",
+    "DEFAULT_OPENAI_MODEL",
     "DEFAULT_LLM_TIMEOUT_SECONDS",
     "HybridCommandInterpreter",
+    "LocalLLMControl",
     "LLMCommandInterpreter",
     "LLM_FAILURE_CLARIFICATION_PROMPT",
     "LLM_INTENT_TOOL_NAME",
@@ -71,11 +81,29 @@ __all__ = [
     "build_llm_system_prompt",
 ]
 
-DEFAULT_LLM_MODEL: Final[str] = "claude-haiku-4-5-20251001"
+LLM_PROVIDER_ANTHROPIC: Final[str] = "anthropic"
+LLM_PROVIDER_OPENAI: Final[str] = "openai"
+SUPPORTED_LLM_PROVIDERS: Final[frozenset[str]] = frozenset(
+    {LLM_PROVIDER_ANTHROPIC, LLM_PROVIDER_OPENAI}
+)
+
+DEFAULT_LLM_PROVIDER: Final[str] = LLM_PROVIDER_OPENAI
+"""Default local GUI provider for GPT-style API keys."""
+
+DEFAULT_ANTHROPIC_MODEL: Final[str] = "claude-haiku-4-5-20251001"
 """Default Anthropic model used for one-shot utterance interpretation."""
+
+DEFAULT_OPENAI_MODEL: Final[str] = "gpt-4.1-mini"
+"""Default OpenAI GPT model used for one-shot utterance interpretation."""
+
+DEFAULT_LLM_MODEL: Final[str] = DEFAULT_ANTHROPIC_MODEL
+"""Backward-compatible default model for direct Anthropic interpreter tests."""
 
 ANTHROPIC_API_KEY_ENV_VAR: Final[str] = "ANTHROPIC_API_KEY"
 """Environment variable consulted when no explicit API key is provided."""
+
+OPENAI_API_KEY_ENV_VAR: Final[str] = "OPENAI_API_KEY"
+"""Environment variable consulted for the OpenAI/GPT provider."""
 
 DEFAULT_LLM_MAX_TOKENS: Final[int] = 1024
 """Default output token cap for one forced-tool interpretation call."""
@@ -102,13 +130,13 @@ LLM_UNAVAILABLE_FAILURE_CODE: Final[str] = "llm_interpreter_unavailable"
 LLM_INTERPRETATION_FAILURE_CODE: Final[str] = "llm_interpretation_failed"
 
 LLM_UNAVAILABLE_REASON: Final[str] = (
-    "LLM interpreter is unavailable: install the anthropic package and "
-    "provide an ANTHROPIC_API_KEY before free-form interpretation can run."
+    "LLM interpreter is unavailable: install the selected provider SDK and "
+    "provide a local API key before free-form interpretation can run."
 )
 LLM_UNAVAILABLE_CLARIFICATION_PROMPT: Final[str] = (
     "LLM 해석기를 사용할 수 없어 명령을 실행하지 않았습니다. "
-    "대안: pip install 'voistarcraft[llm]' 설치 후 ANTHROPIC_API_KEY를 "
-    "설정하거나, ToyCraft MVP 명령 중 하나로 다시 말해 주세요. "
+    "대안: pip install 'voistarcraft[llm]' 설치 후 로컬 웹 GUI에서 "
+    "API 키를 설정하거나, ToyCraft MVP 명령 중 하나로 다시 말해 주세요. "
     "예: 상태 알려줘 / 일꾼 계속 찍어 / 본진에 배럭 지어"
 )
 LLM_FAILURE_CLARIFICATION_PROMPT: Final[str] = (
@@ -292,11 +320,14 @@ class LLMCommandInterpreter:
 
     model: str = DEFAULT_LLM_MODEL
     api_key: str | None = None
+    provider: str = LLM_PROVIDER_ANTHROPIC
     max_tokens: int = DEFAULT_LLM_MAX_TOKENS
     timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS
     client_factory: Callable[[], object] | None = None
 
     def __post_init__(self) -> None:
+        if self.provider not in SUPPORTED_LLM_PROVIDERS:
+            raise ValueError("provider must be 'anthropic' or 'openai'.")
         if not isinstance(self.model, str) or not self.model.strip():
             raise ValueError("model must be a non-empty string.")
         if self.api_key is not None and not isinstance(self.api_key, str):
@@ -331,7 +362,7 @@ class LLMCommandInterpreter:
 
         if self.client_factory is not None:
             return True
-        return is_anthropic_available() and self._resolved_api_key() is not None
+        return self._provider_available() and self._resolved_api_key() is not None
 
     def interpret_text(self, command_text: str) -> IntentPayload | None:
         """Return the nearest supported typed Intent DSL payload, if any."""
@@ -405,9 +436,34 @@ class LLMCommandInterpreter:
         )
 
     def _create_message(self, command_text: str) -> object:
-        """Issue the single forced-tool Anthropic call for one utterance."""
+        """Issue the single forced-tool LLM call for one utterance."""
 
         client = self._build_client()
+        if self.provider == LLM_PROVIDER_OPENAI:
+            return client.chat.completions.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": command_text},
+                ],
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": LLM_INTENT_TOOL_NAME,
+                            "description": (
+                                "Submit exactly one supported commander intent."
+                            ),
+                            "parameters": build_intent_tool_input_schema(),
+                        },
+                    }
+                ],
+                tool_choice={
+                    "type": "function",
+                    "function": {"name": LLM_INTENT_TOOL_NAME},
+                },
+            )
         return client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
@@ -422,6 +478,12 @@ class LLMCommandInterpreter:
 
         if self.client_factory is not None:
             return self.client_factory()
+        if self.provider == LLM_PROVIDER_OPENAI:
+            openai_module = require_openai()
+            return openai_module.OpenAI(
+                api_key=self._resolved_api_key(),
+                timeout=float(self.timeout_seconds),
+            )
         anthropic_module = require_anthropic()
         return anthropic_module.Anthropic(
             api_key=self._resolved_api_key(),
@@ -429,12 +491,97 @@ class LLMCommandInterpreter:
         )
 
     def _resolved_api_key(self) -> str | None:
-        """Return the explicit key or the ANTHROPIC_API_KEY env fallback."""
+        """Return the explicit key or the provider-specific env fallback."""
 
         if self.api_key is not None and self.api_key.strip():
             return self.api_key
-        env_key = os.environ.get(ANTHROPIC_API_KEY_ENV_VAR, "")
+        env_var = (
+            OPENAI_API_KEY_ENV_VAR
+            if self.provider == LLM_PROVIDER_OPENAI
+            else ANTHROPIC_API_KEY_ENV_VAR
+        )
+        env_key = os.environ.get(env_var, "")
         return env_key if env_key.strip() else None
+
+    def _provider_available(self) -> bool:
+        if self.provider == LLM_PROVIDER_OPENAI:
+            return is_openai_available()
+        return is_anthropic_available()
+
+
+class LocalLLMControl:
+    """In-memory, localhost-configurable LLM credentials and interpreter.
+
+    API keys are deliberately process-local: they are never written to disk,
+    never exposed in snapshots, and only used to construct per-call SDK
+    clients inside this Python process.
+    """
+
+    def __init__(
+        self,
+        provider: str = DEFAULT_LLM_PROVIDER,
+        model: str | None = None,
+    ) -> None:
+        self._lock = threading.Lock()
+        self._provider = _normalize_provider(provider)
+        self._model = model.strip() if isinstance(model, str) and model.strip() else (
+            _default_model_for_provider(self._provider)
+        )
+        self._api_key = ""
+
+    def configure(self, provider: str, api_key: str, model: str = "") -> dict[str, object]:
+        """Set provider credentials in process memory and return a safe snapshot."""
+
+        normalized_provider = _normalize_provider(provider)
+        if not isinstance(api_key, str) or not api_key.strip():
+            raise ValueError("LLM API key must be a non-empty string.")
+        resolved_model = model.strip() if isinstance(model, str) and model.strip() else (
+            _default_model_for_provider(normalized_provider)
+        )
+        _require_provider_dependency(normalized_provider)
+        with self._lock:
+            self._provider = normalized_provider
+            self._model = resolved_model
+            self._api_key = api_key.strip()
+        return self.snapshot()
+
+    def snapshot(self) -> dict[str, object]:
+        """Return safe status metadata without exposing the API key."""
+
+        with self._lock:
+            provider = self._provider
+            model = self._model
+            configured = bool(self._api_key)
+        return {
+            "provider": provider,
+            "model": model,
+            "configured": configured,
+            "key_present": configured,
+        }
+
+    def is_available(self) -> bool:
+        with self._lock:
+            provider = self._provider
+            has_key = bool(self._api_key)
+        return has_key and _is_provider_available(provider)
+
+    def interpret(self, command_text: str) -> CommandInterpretationResult:
+        interpreter = self._build_current_interpreter()
+        return interpreter.interpret(command_text)
+
+    def interpret_text(self, command_text: str) -> IntentPayload | None:
+        return self.interpret(command_text).payload
+
+    def _build_current_interpreter(self) -> LLMCommandInterpreter:
+        with self._lock:
+            provider = self._provider
+            model = self._model
+            api_key = self._api_key
+        return LLMCommandInterpreter(
+            provider=provider,
+            model=model,
+            api_key=api_key or None,
+        )
 
 
 @dataclass(frozen=True)
@@ -449,7 +596,7 @@ class HybridCommandInterpreter:
     """
 
     rule_interpreter: CommandInterpreterInterface = DEFAULT_COMMAND_INTERPRETER
-    llm_interpreter: LLMCommandInterpreter | None = None
+    llm_interpreter: object | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.rule_interpreter, CommandInterpreterInterface):
@@ -484,6 +631,12 @@ class HybridCommandInterpreter:
         llm_result = llm.interpret(command_text)
         if llm_result.payload is not None:
             return llm_result
+        failure = llm_result.failure
+        if (
+            failure is not None
+            and failure.primary_reason.code == LLM_INTERPRETATION_FAILURE_CODE
+        ):
+            return llm_result
         return rule_result
 
 
@@ -491,6 +644,7 @@ def build_hybrid_interpreter(
     api_key: str | None = None,
     model: str = DEFAULT_LLM_MODEL,
     *,
+    provider: str = LLM_PROVIDER_ANTHROPIC,
     rule_interpreter: CommandInterpreterInterface = DEFAULT_COMMAND_INTERPRETER,
     max_tokens: int = DEFAULT_LLM_MAX_TOKENS,
     timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
@@ -501,6 +655,7 @@ def build_hybrid_interpreter(
     llm_interpreter = LLMCommandInterpreter(
         model=model,
         api_key=api_key,
+        provider=provider,
         max_tokens=max_tokens,
         timeout_seconds=timeout_seconds,
         client_factory=client_factory,
@@ -519,6 +674,10 @@ def build_hybrid_interpreter(
 def _extract_tool_input(response: object) -> Mapping[str, object] | None:
     """Return the first tool_use block input from a duck-typed response."""
 
+    openai_input = _extract_openai_tool_input(response)
+    if openai_input is not None:
+        return openai_input
+
     content = _read_field(response, "content")
     if not isinstance(content, (list, tuple)):
         return None
@@ -532,12 +691,63 @@ def _extract_tool_input(response: object) -> Mapping[str, object] | None:
     return None
 
 
+def _extract_openai_tool_input(response: object) -> Mapping[str, object] | None:
+    choices = _read_field(response, "choices")
+    if not isinstance(choices, (list, tuple)) or not choices:
+        return None
+    message = _read_field(choices[0], "message")
+    tool_calls = _read_field(message, "tool_calls")
+    if not isinstance(tool_calls, (list, tuple)) or not tool_calls:
+        return None
+    function = _read_field(tool_calls[0], "function")
+    arguments = _read_field(function, "arguments")
+    if isinstance(arguments, Mapping):
+        return arguments
+    if isinstance(arguments, str):
+        try:
+            decoded = json.loads(arguments)
+        except json.JSONDecodeError:
+            return None
+        return decoded if isinstance(decoded, Mapping) else None
+    return None
+
+
 def _read_field(value: object, name: str) -> object:
     """Read one field from an SDK object or a mapping-shaped fake."""
 
     if isinstance(value, Mapping):
         return value.get(name)
     return getattr(value, name, None)
+
+
+def _normalize_provider(provider: str) -> str:
+    if not isinstance(provider, str):
+        raise ValueError("LLM provider must be a string.")
+    normalized = provider.strip().lower()
+    if normalized in {"gpt", "chatgpt"}:
+        normalized = LLM_PROVIDER_OPENAI
+    if normalized not in SUPPORTED_LLM_PROVIDERS:
+        raise ValueError("LLM provider must be 'openai' or 'anthropic'.")
+    return normalized
+
+
+def _default_model_for_provider(provider: str) -> str:
+    return (
+        DEFAULT_OPENAI_MODEL
+        if provider == LLM_PROVIDER_OPENAI
+        else DEFAULT_ANTHROPIC_MODEL
+    )
+
+
+def _is_provider_available(provider: str) -> bool:
+    return is_openai_available() if provider == LLM_PROVIDER_OPENAI else is_anthropic_available()
+
+
+def _require_provider_dependency(provider: str) -> None:
+    if provider == LLM_PROVIDER_OPENAI:
+        require_openai()
+    else:
+        require_anthropic()
 
 
 def _intent_field_names(intent_name: object) -> tuple[str, ...]:

@@ -19,6 +19,7 @@ from unittest import mock
 
 from starcraft_commander import web_gui
 from starcraft_commander.demo_sc2 import build_dry_run_session
+from starcraft_commander.llm_interpreter import LocalLLMControl
 from starcraft_commander.web_gui import (
     DEFAULT_WEB_GUI_PORT,
     WEB_GUI_TOKEN_HEADER,
@@ -176,6 +177,49 @@ class WebGuiServerHTTPTest(unittest.TestCase):
         self.assertEqual(document["supply_used"], 20)
         self.assertEqual(document["supply_cap"], 21)
         self.assertEqual(document["own_units"].get("SCV"), 12)
+
+    def test_llm_status_endpoint_never_exposes_key(self):
+        document = self.get_json("/api/llm")
+        self.assertFalse(document["configured"])
+        self.assertNotIn("api_key", document)
+
+    def test_llm_config_endpoint_sets_process_local_key(self):
+        session, _bot = build_dry_run_session()
+        bridge = SessionLoopBridge(
+            session=session,
+            llm_control=LocalLLMControl(provider="openai"),
+        )
+        bridge.start()
+        self.addCleanup(bridge.stop)
+        server = WebGuiServer(bridge=bridge, port=0)
+        server.start()
+        self.addCleanup(server.stop)
+
+        connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
+        try:
+            body = json.dumps(
+                {
+                    "provider": "openai",
+                    "model": "gpt-test",
+                    "api_key": "sk-local-only-test",
+                }
+            )
+            connection.request(
+                "POST",
+                "/api/llm",
+                body=body.encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode("utf-8"))
+        finally:
+            connection.close()
+        self.assertEqual(response.status, 200)
+        self.assertTrue(payload["configured"])
+        self.assertTrue(payload["key_present"])
+        self.assertEqual(payload["provider"], "openai")
+        self.assertEqual(payload["model"], "gpt-test")
+        self.assertNotIn("sk-local-only-test", json.dumps(payload))
 
     def test_history_after_param_filters_already_seen_events(self):
         self.post_command("상황 보고해줘")

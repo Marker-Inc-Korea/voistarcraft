@@ -1328,7 +1328,10 @@ _GAS_RESOURCE_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
     ("가스", "vespene", "gas"),
 )
 _MINERAL_RESOURCE_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
-    ("미네랄", "광물", "mineral", "minerals"),
+    ("미네랄", "광물", "자원", "resource", "resources", "mineral", "minerals"),
+)
+_GENERIC_RESOURCE_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("자원", "resource", "resources"),
 )
 _NATURAL_BASE_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
     ("앞마당", "내추럴", "natural", "expansion"),
@@ -1338,9 +1341,6 @@ _SUPPLY_SUBJECT_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
 )
 _SUPPLY_PRESSURE_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
     ("막히", "안막히", "트이", "부족", "늘려", "뚫", "미리", "block", "blocked", "cap", "room"),
-)
-_SUPPLY_BUILD_VERB_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
-    ("지어", "올려", "건설", "짓", "확보", "build", "construct", "raise"),
 )
 _STRUCTURE_NAME_ALIASES: Final[tuple[tuple[StructureName, tuple[str, ...]], ...]] = (
     (
@@ -1360,7 +1360,19 @@ _STRUCTURE_NAME_ALIASES: Final[tuple[tuple[StructureName, tuple[str, ...]], ...]
     ),
 )
 _BUILD_STRUCTURE_VERB_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
-    ("지어", "지어서", "짓", "올려", "건설", "만들", "build", "construct", "make", "raise"),
+    (
+        "지어",
+        "지어서",
+        "짓",
+        "올려",
+        "건설",
+        "설치",
+        "만들",
+        "build",
+        "construct",
+        "make",
+        "raise",
+    ),
 )
 _NATURAL_LOCATION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
     ("앞마당", "natural"),
@@ -1400,6 +1412,9 @@ _ARMY_TRAINING_VERB_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
 )
 _SCOUT_ACTION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
     ("정찰", "확인", "체크", "봐", "보러", "살펴", "scout", "check", "send"),
+)
+_PLAIN_SCOUT_ORDER_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
+    ("정찰", "scout"),
 )
 _SCOUT_TARGET_CONTEXT_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
     (
@@ -1631,7 +1646,20 @@ _STATE_SUBJECT_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
     ("상태", "상황", "현황", "브리핑", "요약", "status", "state", "summary"),
 )
 _SUMMARY_ACTION_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
-    ("알려", "보여", "요약", "브리핑", "정리", "보고", "show", "summarize", "brief", "report"),
+    (
+        "알려",
+        "보여",
+        "확인",
+        "요약",
+        "브리핑",
+        "정리",
+        "보고",
+        "show",
+        "check",
+        "summarize",
+        "brief",
+        "report",
+    ),
 )
 _CURRENT_ACTIVITY_PATTERNS: Final[tuple[str, ...]] = _normalize_patterns(
     ("뭐하고", "어떻게되고", "무슨일", "whatsgoingon", "whatshappening"),
@@ -1649,7 +1677,12 @@ _COUNT_KEYWORDS: Final[tuple[tuple[int, tuple[str, ...]], ...]] = (
     (6, _normalize_patterns(("여섯기", "6기", "여섯", "six"))),
     (5, _normalize_patterns(("다섯기", "5기", "다섯", "five"))),
     (4, _normalize_patterns(("네기", "4기", "넷", "네마리", "four"))),
-    (3, _normalize_patterns(("세기", "3기", "셋", "세마리", "three"))),
+    (
+        3,
+        _normalize_patterns(
+            ("세기", "3기", "셋", "세마리", "여러기", "여러개", "여러마리", "three"),
+        ),
+    ),
     (2, _normalize_patterns(("두기", "2기", "둘", "두마리", "two"))),
     (1, _normalize_patterns(("한기", "1기", "하나", "한마리", "하나씩", "one"))),
 )
@@ -1755,10 +1788,20 @@ def _looks_like_one_shot_worker_training(normalized_command: str) -> bool:
 
 
 def _looks_like_gather_resource(normalized_command: str) -> bool:
+    if _contains_any_pattern(normalized_command, _ENEMY_OWNER_PATTERNS):
+        return False
+    has_worker_subject = _contains_any_pattern(
+        normalized_command,
+        _WORKER_SUBJECT_PATTERNS,
+    )
+    is_compact_resource_order = _contains_any_pattern(
+        normalized_command,
+        _GENERIC_RESOURCE_PATTERNS,
+    )
     return (
-        _contains_any_pattern(normalized_command, _WORKER_SUBJECT_PATTERNS)
-        and _detect_resource_name(normalized_command) is not None
+        _detect_resource_name(normalized_command) is not None
         and _contains_any_pattern(normalized_command, _GATHER_ACTION_PATTERNS)
+        and (has_worker_subject or is_compact_resource_order)
     )
 
 
@@ -1785,11 +1828,7 @@ def _looks_like_prevent_supply_block(normalized_command: str) -> bool:
         normalized_command,
         _SUPPLY_PRESSURE_PATTERNS,
     )
-    has_build_verb = _contains_any_pattern(
-        normalized_command,
-        _SUPPLY_BUILD_VERB_PATTERNS,
-    )
-    return has_supply_subject and (has_supply_action or has_build_verb)
+    return has_supply_subject and has_supply_action
 
 
 def _build_structure_target_from_command(
@@ -1838,9 +1877,16 @@ def _looks_like_train_unit(normalized_command: str) -> bool:
 
 
 def _looks_like_send_scout(normalized_command: str) -> bool:
-    return _contains_any_pattern(
-        normalized_command, _SCOUT_ACTION_PATTERNS
-    ) and _contains_any_pattern(normalized_command, _SCOUT_TARGET_CONTEXT_PATTERNS)
+    has_scout_action = _contains_any_pattern(normalized_command, _SCOUT_ACTION_PATTERNS)
+    has_target_context = _contains_any_pattern(
+        normalized_command,
+        _SCOUT_TARGET_CONTEXT_PATTERNS,
+    )
+    is_plain_scout_order = _contains_any_pattern(
+        normalized_command,
+        _PLAIN_SCOUT_ORDER_PATTERNS,
+    )
+    return has_scout_action and (has_target_context or is_plain_scout_order)
 
 
 def _detect_send_scout_target(normalized_command: str) -> str:

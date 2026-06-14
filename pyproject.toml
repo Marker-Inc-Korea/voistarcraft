@@ -17,8 +17,9 @@ dependencies = []
 # StarCraft II itself plus maps must also be installed locally (see docs/sc2-smoke-test.md).
 sc2 = ["burnysc2>=6.5"]
 voice = ["faster-whisper>=1.0", "sounddevice>=0.4.6"]
-# LLM fallback interpretation for free-form Korean commands (export ANTHROPIC_API_KEY).
-llm = ["anthropic>=0.40"]
+# LLM interpretation for free-form Korean commands. Keys may be supplied via
+# local env vars or the localhost web GUI; they are never required in repo files.
+llm = ["anthropic>=0.40", "openai>=1.0"]
 dev = ["pytest>=7"]
 
 [tool.setuptools.packages.find]

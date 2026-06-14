@@ -19,6 +19,8 @@ from typing import Final
 __all__ = [
     "ANTHROPIC_INSTALL_HINT",
     "ANTHROPIC_MODULE_NAME",
+    "OPENAI_INSTALL_HINT",
+    "OPENAI_MODULE_NAME",
     "FASTER_WHISPER_INSTALL_HINT",
     "FASTER_WHISPER_MODULE_NAME",
     "MissingLLMDependencyError",
@@ -29,10 +31,12 @@ __all__ = [
     "SOUNDDEVICE_INSTALL_HINT",
     "SOUNDDEVICE_MODULE_NAME",
     "is_anthropic_available",
+    "is_openai_available",
     "is_faster_whisper_available",
     "is_python_sc2_available",
     "is_sounddevice_available",
     "require_anthropic",
+    "require_openai",
     "require_faster_whisper",
     "require_python_sc2",
     "require_sounddevice",
@@ -49,6 +53,9 @@ SOUNDDEVICE_MODULE_NAME: Final[str] = "sounddevice"
 
 ANTHROPIC_MODULE_NAME: Final[str] = "anthropic"
 """Importable module name provided by the anthropic SDK distribution."""
+
+OPENAI_MODULE_NAME: Final[str] = "openai"
+"""Importable module name provided by the OpenAI SDK distribution."""
 
 PYTHON_SC2_INSTALL_HINT: Final[str] = (
     "The python-sc2 runtime (importable package 'sc2') is not installed. "
@@ -96,6 +103,17 @@ ANTHROPIC_INSTALL_HINT: Final[str] = (
     "ANTHROPIC_API_KEY 환경 변수에 유효한 Anthropic API 키를 설정하세요."
 )
 """Actionable bilingual guidance shown when the anthropic SDK is absent."""
+
+OPENAI_INSTALL_HINT: Final[str] = (
+    "The optional LLM dependency 'openai' is not installed. "
+    "Install GPT command interpretation with: pip install 'voistarcraft[llm]' "
+    "(or: pip install openai), then provide an OpenAI API key in the local web GUI "
+    "or export OPENAI_API_KEY. "
+    "GPT 한국어 명령 해석에 필요한 'openai' 패키지가 설치되어 있지 않습니다. "
+    "pip install 'voistarcraft[llm]' 명령으로 설치한 뒤 로컬 웹 GUI에서 "
+    "OpenAI API 키를 입력하거나 OPENAI_API_KEY 환경 변수를 설정하세요."
+)
+"""Actionable bilingual guidance shown when the OpenAI SDK is absent."""
 
 
 class MissingSC2RuntimeError(RuntimeError):
@@ -182,6 +200,12 @@ def is_anthropic_available() -> bool:
     return _import_optional_module(ANTHROPIC_MODULE_NAME) is not None
 
 
+def is_openai_available() -> bool:
+    """Return whether the OpenAI LLM SDK package is importable."""
+
+    return _import_optional_module(OPENAI_MODULE_NAME) is not None
+
+
 def require_anthropic() -> ModuleType:
     """Return the lazily imported ``anthropic`` package or raise.
 
@@ -193,3 +217,12 @@ def require_anthropic() -> ModuleType:
         return importlib.import_module(ANTHROPIC_MODULE_NAME)
     except ImportError as error:
         raise MissingLLMDependencyError(ANTHROPIC_INSTALL_HINT) from error
+
+
+def require_openai() -> ModuleType:
+    """Return the lazily imported ``openai`` package or raise."""
+
+    try:
+        return importlib.import_module(OPENAI_MODULE_NAME)
+    except ImportError as error:
+        raise MissingLLMDependencyError(OPENAI_INSTALL_HINT) from error
