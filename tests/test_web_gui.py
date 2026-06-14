@@ -11,6 +11,9 @@ import http.client
 import inspect
 import io
 import json
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -154,6 +157,28 @@ class WebGuiServerHTTPTest(unittest.TestCase):
             "English",
             "中文",
             "LLM 필수",
+            "LLM 키 상태 확인 실패",
+            "StarCraft II 자동 연결 대기 중입니다.",
+            "🚀 시작 메뉴얼",
+            "startup-guide-entry",
+            "renderStartupGuide",
+            "collapsible-panel",
+            "<details class=\"collapsible-panel\">",
+            "MAX_CHAT_EVENTS = 36",
+            "window.location.assign(status.url)",
+            "live-open-button",
+            "live-refresh-button",
+            "llm-provider-choice",
+            "llm-model-select",
+            "handleProviderChoiceChange",
+            "onchange=\"handleProviderChoiceChange",
+            "type=\"radio\"",
+            "gpt-5.5",
+            "gpt-5.4-mini",
+            "gemini-3.5-flash",
+            "grok-4.3",
+            "/api/live/status",
+            "parseJsonResponse",
             "setInterval(pollHistory",
             "setInterval(pollState",
         ):
@@ -356,7 +381,8 @@ class WebGuiServerHTTPTest(unittest.TestCase):
         self.assertTrue(self.server.url.startswith("http://127.0.0.1:"))
         parameters = inspect.signature(WebGuiServer.__init__).parameters
         self.assertEqual(
-            list(parameters), ["self", "bridge", "port", "host", "auth_token"]
+            list(parameters),
+            ["self", "bridge", "port", "host", "auth_token", "auto_launch_live"],
         )
 
     def test_token_protects_network_exposed_server(self):
@@ -588,6 +614,15 @@ class RenderWebGuiPageTest(unittest.TestCase):
             "appendPendingCommand",
             "setupVoiceInput",
             "voice-wave",
+            "provider-option",
+            "claude-fable-4-5-20251001",
+            "claude-haiku-4-5-20251001",
+            "grok-build-0.1",
+            "selectedLlmChoice",
+            "selectedProviderValue",
+            "handleLiveStart",
+            "if (data.configured)",
+            "setLiveStatusText",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, page)
@@ -607,6 +642,30 @@ class RenderWebGuiPageTest(unittest.TestCase):
         for forbidden in ("https://cdn.", "http://cdn.", "unpkg.com", "jsdelivr"):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, page)
+
+    def test_embedded_javascript_is_syntax_valid(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        page = render_web_gui_page()
+        start = page.index("<script>") + len("<script>")
+        end = page.index("</script>", start)
+        with tempfile.NamedTemporaryFile("w", suffix=".js") as script_file:
+            script_file.write(page[start:end])
+            script_file.flush()
+            result = subprocess.run(
+                [node, "--check", script_file.name],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_standalone_dry_run_wires_process_local_llm_control(self):
+        source = inspect.getsource(web_gui.main)
+        self.assertIn("LocalLLMControl", source)
+        self.assertIn("HybridCommandInterpreter", source)
+        self.assertIn("llm_control=llm_control", source)
 
 
 class WebGuiServerConstructionTest(unittest.TestCase):

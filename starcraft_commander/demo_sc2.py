@@ -55,6 +55,8 @@ from starcraft_commander.llm_interpreter import (
     ANTHROPIC_API_KEY_ENV_VAR,
     DEFAULT_LLM_PROVIDER,
     DEFAULT_OPENAI_MODEL,
+    GEMINI_API_KEY_ENV_VAR,
+    GROK_API_KEY_ENV_VAR,
     HybridCommandInterpreter,
     LocalLLMControl,
     OPENAI_API_KEY_ENV_VAR,
@@ -330,11 +332,22 @@ def build_local_llm_control(provider: str, model: str) -> LocalLLMControl:
     if normalized in {"openai", "gpt", "chatgpt"}:
         require_openai()
         env_var = OPENAI_API_KEY_ENV_VAR
+        normalized = "openai"
     elif normalized == "anthropic":
         require_anthropic()
         env_var = ANTHROPIC_API_KEY_ENV_VAR
+    elif normalized in {"gemini", "google", "google-gemini"}:
+        require_openai()
+        env_var = GEMINI_API_KEY_ENV_VAR
+        normalized = "gemini"
+    elif normalized in {"grok", "xai", "x-ai", "x.ai"}:
+        require_openai()
+        env_var = GROK_API_KEY_ENV_VAR
+        normalized = "grok"
     else:
-        raise MissingLLMDependencyError("LLM provider must be 'openai' or 'anthropic'.")
+        raise MissingLLMDependencyError(
+            "LLM provider must be openai, anthropic, gemini, or grok."
+        )
     api_key = os.environ.get(env_var, "").strip()
     if not api_key:
         raise MissingLLMDependencyError(

@@ -58,8 +58,12 @@ from toycraft_commander.interpreter import (
 
 __all__ = [
     "ANTHROPIC_API_KEY_ENV_VAR",
+    "GEMINI_API_KEY_ENV_VAR",
+    "GROK_API_KEY_ENV_VAR",
     "OPENAI_API_KEY_ENV_VAR",
     "DEFAULT_ANTHROPIC_MODEL",
+    "DEFAULT_GEMINI_MODEL",
+    "DEFAULT_GROK_MODEL",
     "DEFAULT_LLM_MAX_TOKENS",
     "DEFAULT_LLM_MODEL",
     "DEFAULT_LLM_PROVIDER",
@@ -82,9 +86,16 @@ __all__ = [
 ]
 
 LLM_PROVIDER_ANTHROPIC: Final[str] = "anthropic"
+LLM_PROVIDER_GEMINI: Final[str] = "gemini"
+LLM_PROVIDER_GROK: Final[str] = "grok"
 LLM_PROVIDER_OPENAI: Final[str] = "openai"
 SUPPORTED_LLM_PROVIDERS: Final[frozenset[str]] = frozenset(
-    {LLM_PROVIDER_ANTHROPIC, LLM_PROVIDER_OPENAI}
+    {
+        LLM_PROVIDER_ANTHROPIC,
+        LLM_PROVIDER_GEMINI,
+        LLM_PROVIDER_GROK,
+        LLM_PROVIDER_OPENAI,
+    }
 )
 
 DEFAULT_LLM_PROVIDER: Final[str] = LLM_PROVIDER_OPENAI
@@ -93,7 +104,13 @@ DEFAULT_LLM_PROVIDER: Final[str] = LLM_PROVIDER_OPENAI
 DEFAULT_ANTHROPIC_MODEL: Final[str] = "claude-haiku-4-5-20251001"
 """Default Anthropic model used for one-shot utterance interpretation."""
 
-DEFAULT_OPENAI_MODEL: Final[str] = "gpt-4.1-mini"
+DEFAULT_GEMINI_MODEL: Final[str] = "gemini-3.5-flash"
+"""Default Gemini OpenAI-compatible model used for command interpretation."""
+
+DEFAULT_GROK_MODEL: Final[str] = "grok-4.3"
+"""Default xAI/Grok OpenAI-compatible model used for command interpretation."""
+
+DEFAULT_OPENAI_MODEL: Final[str] = "gpt-5.4-mini"
 """Default OpenAI GPT model used for one-shot utterance interpretation."""
 
 DEFAULT_LLM_MODEL: Final[str] = DEFAULT_ANTHROPIC_MODEL
@@ -104,6 +121,20 @@ ANTHROPIC_API_KEY_ENV_VAR: Final[str] = "ANTHROPIC_API_KEY"
 
 OPENAI_API_KEY_ENV_VAR: Final[str] = "OPENAI_API_KEY"
 """Environment variable consulted for the OpenAI/GPT provider."""
+
+GEMINI_API_KEY_ENV_VAR: Final[str] = "GEMINI_API_KEY"
+"""Environment variable consulted for the Gemini OpenAI-compatible provider."""
+
+GROK_API_KEY_ENV_VAR: Final[str] = "XAI_API_KEY"
+"""Environment variable consulted for the xAI/Grok provider."""
+
+GEMINI_OPENAI_BASE_URL: Final[str] = (
+    "https://generativelanguage.googleapis.com/v1beta/openai/"
+)
+"""Gemini's OpenAI-compatible API base URL."""
+
+GROK_OPENAI_BASE_URL: Final[str] = "https://api.x.ai/v1"
+"""xAI's OpenAI-compatible API base URL."""
 
 DEFAULT_LLM_MAX_TOKENS: Final[int] = 1024
 """Default output token cap for one forced-tool interpretation call."""
@@ -439,7 +470,7 @@ class LLMCommandInterpreter:
         """Issue the single forced-tool LLM call for one utterance."""
 
         client = self._build_client()
-        if self.provider == LLM_PROVIDER_OPENAI:
+        if _uses_openai_compatible_client(self.provider):
             return client.chat.completions.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
@@ -478,11 +509,17 @@ class LLMCommandInterpreter:
 
         if self.client_factory is not None:
             return self.client_factory()
-        if self.provider == LLM_PROVIDER_OPENAI:
+        if _uses_openai_compatible_client(self.provider):
             openai_module = require_openai()
+            kwargs: dict[str, object] = {
+                "api_key": self._resolved_api_key(),
+                "timeout": float(self.timeout_seconds),
+            }
+            base_url = _openai_compatible_base_url(self.provider)
+            if base_url:
+                kwargs["base_url"] = base_url
             return openai_module.OpenAI(
-                api_key=self._resolved_api_key(),
-                timeout=float(self.timeout_seconds),
+                **kwargs,
             )
         anthropic_module = require_anthropic()
         return anthropic_module.Anthropic(
@@ -495,16 +532,12 @@ class LLMCommandInterpreter:
 
         if self.api_key is not None and self.api_key.strip():
             return self.api_key
-        env_var = (
-            OPENAI_API_KEY_ENV_VAR
-            if self.provider == LLM_PROVIDER_OPENAI
-            else ANTHROPIC_API_KEY_ENV_VAR
-        )
+        env_var = _api_key_env_var_for_provider(self.provider)
         env_key = os.environ.get(env_var, "")
         return env_key if env_key.strip() else None
 
     def _provider_available(self) -> bool:
-        if self.provider == LLM_PROVIDER_OPENAI:
+        if _uses_openai_compatible_client(self.provider):
             return is_openai_available()
         return is_anthropic_available()
 
@@ -726,28 +759,64 @@ def _normalize_provider(provider: str) -> str:
     normalized = provider.strip().lower()
     if normalized in {"gpt", "chatgpt"}:
         normalized = LLM_PROVIDER_OPENAI
+    if normalized in {"google", "google-gemini"}:
+        normalized = LLM_PROVIDER_GEMINI
+    if normalized in {"xai", "x-ai", "x.ai"}:
+        normalized = LLM_PROVIDER_GROK
     if normalized not in SUPPORTED_LLM_PROVIDERS:
-        raise ValueError("LLM provider must be 'openai' or 'anthropic'.")
+        raise ValueError("LLM provider must be openai, anthropic, gemini, or grok.")
     return normalized
 
 
 def _default_model_for_provider(provider: str) -> str:
-    return (
-        DEFAULT_OPENAI_MODEL
-        if provider == LLM_PROVIDER_OPENAI
-        else DEFAULT_ANTHROPIC_MODEL
-    )
+    if provider == LLM_PROVIDER_OPENAI:
+        return DEFAULT_OPENAI_MODEL
+    if provider == LLM_PROVIDER_GEMINI:
+        return DEFAULT_GEMINI_MODEL
+    if provider == LLM_PROVIDER_GROK:
+        return DEFAULT_GROK_MODEL
+    return DEFAULT_ANTHROPIC_MODEL
 
 
 def _is_provider_available(provider: str) -> bool:
-    return is_openai_available() if provider == LLM_PROVIDER_OPENAI else is_anthropic_available()
+    return (
+        is_openai_available()
+        if _uses_openai_compatible_client(provider)
+        else is_anthropic_available()
+    )
 
 
 def _require_provider_dependency(provider: str) -> None:
-    if provider == LLM_PROVIDER_OPENAI:
+    if _uses_openai_compatible_client(provider):
         require_openai()
     else:
         require_anthropic()
+
+
+def _uses_openai_compatible_client(provider: str) -> bool:
+    return provider in {
+        LLM_PROVIDER_GEMINI,
+        LLM_PROVIDER_GROK,
+        LLM_PROVIDER_OPENAI,
+    }
+
+
+def _api_key_env_var_for_provider(provider: str) -> str:
+    if provider == LLM_PROVIDER_GEMINI:
+        return GEMINI_API_KEY_ENV_VAR
+    if provider == LLM_PROVIDER_GROK:
+        return GROK_API_KEY_ENV_VAR
+    if provider == LLM_PROVIDER_OPENAI:
+        return OPENAI_API_KEY_ENV_VAR
+    return ANTHROPIC_API_KEY_ENV_VAR
+
+
+def _openai_compatible_base_url(provider: str) -> str:
+    if provider == LLM_PROVIDER_GEMINI:
+        return GEMINI_OPENAI_BASE_URL
+    if provider == LLM_PROVIDER_GROK:
+        return GROK_OPENAI_BASE_URL
+    return ""
 
 
 def _intent_field_names(intent_name: object) -> tuple[str, ...]:

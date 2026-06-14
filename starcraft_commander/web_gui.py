@@ -32,6 +32,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import re
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -57,6 +61,34 @@ WEB_GUI_TOKEN_HEADER: Final[str] = "X-VoiStarCraft-Token"
 
 DEFAULT_WEB_GUI_PORT: Final[int] = 8350
 """Default web GUI port; ``0`` requests an ephemeral port (used by tests)."""
+
+DEFAULT_SC2_INSTALL_PATH: Final[str] = (
+    "/Users/jinminseong/Desktop/StarCraft2/StarCraft II"
+)
+"""Default local StarCraft II install path used by auto live launch."""
+
+DEFAULT_LIVE_MAP: Final[str] = "AcropolisLE"
+"""Default map for auto-launched live smoke sessions."""
+
+DEFAULT_LIVE_DIFFICULTY: Final[str] = "easy"
+"""Default computer difficulty for auto-launched live smoke sessions."""
+
+_LOCAL_URL_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"https?://127\.0\.0\.1:\d+(?:/[^\s]*)?"
+)
+
+
+def _api_key_env_var_for_provider(provider: str) -> str:
+    """Return the child-process env var used by one supported provider."""
+
+    normalized = provider.strip().lower()
+    if normalized == "anthropic":
+        return "ANTHROPIC_API_KEY"
+    if normalized == "gemini":
+        return "GEMINI_API_KEY"
+    if normalized == "grok":
+        return "XAI_API_KEY"
+    return "OPENAI_API_KEY"
 
 WEB_GUI_PAGE_TITLE: Final[str] = "VoiStarCraft 커맨더"
 """Korean single-page UI title."""
@@ -157,6 +189,117 @@ class _SimpleHistory:
 
         with self._lock:
             return self._seq
+
+
+class _LiveLaunchManager:
+    """Start one local live SC2 process and expose safe startup metadata."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._process: subprocess.Popen[str] | None = None
+        self._status = "idle"
+        self._url = ""
+        self._error = ""
+        self._last_line = ""
+
+    def start(self, provider: str, api_key: str, model: str) -> dict[str, object]:
+        """Start the live demo process once, passing the key only via env."""
+
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                return self._snapshot_unlocked()
+            self._status = "starting"
+            self._url = ""
+            self._error = ""
+            self._last_line = ""
+            env = os.environ.copy()
+            env["SC2PATH"] = env.get("SC2PATH", DEFAULT_SC2_INSTALL_PATH)
+            env[_api_key_env_var_for_provider(provider)] = api_key
+            argv = [
+                sys.executable,
+                "-u",
+                "-m",
+                "starcraft_commander.demo_sc2",
+                "--map",
+                DEFAULT_LIVE_MAP,
+                "--difficulty",
+                DEFAULT_LIVE_DIFFICULTY,
+                "--gui",
+                "0",
+                "--llm-provider",
+                provider,
+                "--llm-model",
+                model,
+            ]
+            try:
+                self._process = subprocess.Popen(
+                    argv,
+                    cwd=os.getcwd(),
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+            except OSError as error:
+                self._status = "failed"
+                self._error = str(error)
+                self._process = None
+                return self._snapshot_unlocked()
+            threading.Thread(
+                target=self._read_output,
+                name="voistarcraft-live-launch-reader",
+                daemon=True,
+            ).start()
+            return self._snapshot_unlocked()
+
+    def snapshot(self) -> dict[str, object]:
+        """Return safe live startup metadata without secrets."""
+
+        with self._lock:
+            process = self._process
+            if process is not None and process.poll() is not None and not self._url:
+                self._status = "failed" if process.returncode else "stopped"
+                if not self._error:
+                    self._error = self._last_line or f"process exited {process.returncode}"
+            return {
+                "enabled": True,
+                "status": self._status,
+                "url": self._url,
+                "error": self._error,
+                "pid": process.pid if process is not None else None,
+                "last_line": self._last_line,
+            }
+
+    def _snapshot_unlocked(self) -> dict[str, object]:
+        process = self._process
+        return {
+            "enabled": True,
+            "status": self._status,
+            "url": self._url,
+            "error": self._error,
+            "pid": process.pid if process is not None else None,
+            "last_line": self._last_line,
+        }
+
+    def _read_output(self) -> None:
+        process = self._process
+        if process is None or process.stdout is None:
+            return
+        for line in process.stdout:
+            clean = line.strip()
+            if not clean:
+                continue
+            with self._lock:
+                self._last_line = clean
+                match = _LOCAL_URL_PATTERN.search(clean)
+                if match:
+                    self._url = match.group(0)
+                    self._status = "ready"
+        with self._lock:
+            if not self._url and self._process is process:
+                self._status = "failed"
+                self._error = self._last_line or "live process exited before GUI URL"
 
 
 class SessionLoopBridge:
@@ -423,24 +566,29 @@ _WEB_GUI_PAGE_TEMPLATE: Final[str] = """<!DOCTYPE html>
     margin: 0; min-height: 100vh; padding: 22px; color: var(--ink);
     font-family: "Avenir Next", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
     background:
-      radial-gradient(circle at 14% 12%, rgba(77, 238, 234, 0.28), transparent 30%),
-      radial-gradient(circle at 82% 4%, rgba(181, 140, 255, 0.25), transparent 26%),
-      radial-gradient(circle at 78% 84%, rgba(255, 209, 102, 0.16), transparent 30%),
-      linear-gradient(135deg, #030816 0%, #0a1230 42%, #1a0f2e 100%);
+      radial-gradient(ellipse at 18% 24%, rgba(64, 224, 255, 0.34) 0%, rgba(64, 224, 255, 0.08) 28%, transparent 54%),
+      radial-gradient(ellipse at 72% 18%, rgba(214, 129, 255, 0.35) 0%, rgba(214, 129, 255, 0.1) 25%, transparent 50%),
+      radial-gradient(ellipse at 78% 76%, rgba(255, 195, 97, 0.22) 0%, rgba(255, 195, 97, 0.06) 24%, transparent 52%),
+      radial-gradient(circle at 50% 115%, rgba(77, 238, 234, 0.16), transparent 42%),
+      linear-gradient(135deg, #02030b 0%, #070c22 38%, #160a28 68%, #030611 100%);
   }
   body::before {
-    content: ""; position: fixed; inset: 0; pointer-events: none; opacity: 0.28;
+    content: ""; position: fixed; inset: 0; pointer-events: none; opacity: 0.72;
     background-image:
-      radial-gradient(circle, rgba(239, 246, 255, 0.75) 1px, transparent 1.5px),
-      linear-gradient(rgba(128, 167, 255, 0.08) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(128, 167, 255, 0.08) 1px, transparent 1px);
-    background-size: 120px 120px, 38px 38px, 38px 38px;
+      radial-gradient(circle at 12% 18%, rgba(255, 255, 255, 0.95) 0 1px, transparent 1.8px),
+      radial-gradient(circle at 46% 62%, rgba(192, 231, 255, 0.8) 0 1px, transparent 1.7px),
+      radial-gradient(circle at 78% 34%, rgba(255, 220, 170, 0.72) 0 1.2px, transparent 2px),
+      radial-gradient(circle at 25% 78%, rgba(255, 255, 255, 0.55) 0 0.8px, transparent 1.6px);
+    background-position: 0 0, 84px 46px, 32px 110px, 146px 26px;
+    background-size: 230px 210px, 310px 280px, 390px 340px, 170px 150px;
   }
   body::after {
-    content: ""; position: fixed; inset: auto -12% -35% 46%; width: 70vw; height: 70vw;
-    pointer-events: none; border-radius: 999px;
-    background: radial-gradient(circle, rgba(77, 238, 234, 0.18), transparent 58%);
-    filter: blur(6px);
+    content: ""; position: fixed; inset: 4% -12% -28% 38%; width: 80vw; height: 80vw;
+    pointer-events: none; border-radius: 999px; opacity: 0.62;
+    background:
+      conic-gradient(from 220deg, transparent 0 18%, rgba(77, 238, 234, 0.18) 26%, rgba(181, 140, 255, 0.18) 38%, transparent 55% 100%),
+      radial-gradient(circle, rgba(77, 238, 234, 0.16), transparent 58%);
+    filter: blur(18px);
   }
   .app-shell { position: relative; z-index: 1; max-width: 1480px; margin: 0 auto; }
   .language-switcher {
@@ -473,7 +621,7 @@ _WEB_GUI_PAGE_TEMPLATE: Final[str] = """<!DOCTYPE html>
   main { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(330px, 0.75fr); gap: 18px; align-items: stretch; }
   #command-panel {
     min-width: 0; display: flex; flex-direction: column; overflow: hidden;
-    min-height: min(740px, calc(100vh - 150px)); border: 1px solid var(--line);
+    height: min(780px, calc(100vh - 150px)); min-height: 560px; border: 1px solid var(--line);
     border-radius: 28px; background: var(--panel); box-shadow: var(--shadow);
     backdrop-filter: blur(18px);
   }
@@ -511,26 +659,55 @@ _WEB_GUI_PAGE_TEMPLATE: Final[str] = """<!DOCTYPE html>
     margin-top: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 22px;
     background: rgba(255, 255, 255, 0.07);
   }
+  .collapsible-panel > summary {
+    display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none;
+    margin: 0; color: var(--ink); font-size: 1rem; font-weight: 900; letter-spacing: -0.02em;
+    border-radius: 14px; padding: 8px 10px; background: rgba(255, 255, 255, 0.06);
+  }
+  .collapsible-panel > summary::-webkit-details-marker { display: none; }
+  .collapsible-panel > summary::before {
+    content: "▸"; color: var(--accent); font-size: 0.9rem; transition: transform 0.16s ease;
+  }
+  .collapsible-panel[open] > summary::before { transform: rotate(90deg); }
+  .collapsible-panel[open] > summary { margin-bottom: 12px; }
   #strategy-briefing {
     margin: 0; color: var(--ink); line-height: 1.55; font-size: 0.92rem; white-space: pre-wrap;
   }
   .chat-trim-note {
-    margin: 0 auto 14px; width: fit-content; max-width: 90%; padding: 7px 11px;
+    position: sticky; top: 0; z-index: 2; margin: 0 auto 14px; width: fit-content; max-width: 90%; padding: 7px 11px;
     color: var(--muted); border: 1px solid var(--line); border-radius: 999px;
-    background: rgba(255, 255, 255, 0.08); font-size: 0.78rem; font-weight: 800;
+    background: rgba(7, 13, 34, 0.86); font-size: 0.78rem; font-weight: 800;
   }
   #llm-panel label { display: block; margin: 8px 0 4px; font-size: 0.78rem; font-weight: 900; color: var(--muted); }
   #llm-panel select, #llm-panel input {
     width: 100%; padding: 10px 11px; border: 1px solid rgba(96, 112, 128, 0.28);
     border-radius: 12px; background: rgba(255, 255, 255, 0.92); color: #071225;
   }
+  .provider-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 8px 0 10px; }
+  .provider-option {
+    display: flex !important; align-items: center; gap: 9px; margin: 0 !important;
+    padding: 9px 10px; border: 1px solid rgba(96, 112, 128, 0.28);
+    border-radius: 13px; background: rgba(255, 255, 255, 0.08); color: var(--ink) !important;
+    cursor: pointer;
+  }
+  .provider-option input { width: auto !important; padding: 0 !important; accent-color: var(--accent); }
   #llm-panel button {
     width: 100%; margin-top: 10px; padding: 11px 12px; border: none; border-radius: 14px;
     background: linear-gradient(135deg, var(--accent), var(--violet)); color: #061126; font-weight: 900; cursor: pointer;
   }
   #llm-status { margin: 8px 0 0; font-size: 0.78rem; color: var(--muted); }
+  #live-status {
+    margin: 10px 0 0; padding: 10px 11px; border: 1px solid var(--line); border-radius: 14px;
+    background: rgba(255, 255, 255, 0.08); color: var(--ink); font-size: 0.8rem; line-height: 1.45;
+  }
+  #live-status a { color: var(--accent); font-weight: 900; }
+  .live-actions { display: flex; gap: 8px; margin-top: 8px; }
+  .live-actions button {
+    flex: 1; margin-top: 0 !important; padding: 9px 10px !important;
+    background: rgba(255, 255, 255, 0.9) !important; color: #071225 !important;
+  }
   #log {
-    flex: 1; min-height: 360px; overflow-y: auto; padding: 20px;
+    flex: 1; min-height: 0; overflow-y: auto; padding: 20px;
     background:
       linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
       radial-gradient(circle at 20% 20%, rgba(77, 238, 234, 0.11), transparent 32%);
@@ -626,7 +803,7 @@ _WEB_GUI_PAGE_TEMPLATE: Final[str] = """<!DOCTYPE html>
     .hero { display: block; }
     .connection-pill { display: inline-block; margin-top: 12px; }
     main { grid-template-columns: 1fr; }
-    #command-panel { min-height: 68vh; }
+    #command-panel { height: 68vh; min-height: 520px; }
     .dashboard-grid { grid-template-columns: 1fr 1fr; }
   }
   @media (max-width: 620px) {
@@ -685,25 +862,52 @@ _WEB_GUI_PAGE_TEMPLATE: Final[str] = """<!DOCTYPE html>
     </dl>
     <p id="state-availability"></p>
     <section id="briefing-panel">
-      <h2 data-i18n="briefingTitle">전략 브리핑</h2>
-      <div id="strategy-briefing" data-i18n="briefingWaiting">상태 데이터를 기다리는 중입니다.</div>
+      <details class="collapsible-panel">
+        <summary><span data-i18n="briefingTitle">전략 브리핑</span></summary>
+        <div id="strategy-briefing" data-i18n="briefingWaiting">상태 데이터를 기다리는 중입니다.</div>
+      </details>
     </section>
     <section id="llm-panel">
-      <h2 data-i18n="llmTitle">LLM 설정</h2>
-      <p class="hint" data-i18n="llmHint">API 키는 이 로컬 프로세스 메모리에만 보관됩니다.</p>
-      <form id="llm-form">
-        <label for="llm-provider">Provider</label>
-        <select id="llm-provider">
-          <option value="openai">OpenAI / GPT</option>
-          <option value="anthropic">Anthropic / Claude</option>
-        </select>
-        <label for="llm-model">Model</label>
-        <input id="llm-model" type="text" autocomplete="off" placeholder="기본 모델 사용">
-        <label for="llm-api-key">API Key</label>
-        <input id="llm-api-key" type="password" autocomplete="off" placeholder="sk-...">
-        <button type="submit" data-i18n="saveLlm">로컬 키 설정</button>
-      </form>
-      <p id="llm-status" data-i18n="llmChecking">LLM 키 상태를 확인 중입니다.</p>
+      <details class="collapsible-panel">
+        <summary><span data-i18n="llmTitle">LLM 설정</span></summary>
+        <p class="hint" data-i18n="llmHint">API 키는 이 로컬 프로세스 메모리에만 보관됩니다.</p>
+        <form id="llm-form">
+          <label data-i18n="llmProviderLabel">모델사 선택</label>
+          <div id="llm-provider-options" class="provider-options">
+            <label class="provider-option">
+              <input type="radio" name="llm-provider-choice" value="openai" onchange="handleProviderChoiceChange('openai')" checked>
+              OpenAI / GPT
+            </label>
+            <label class="provider-option">
+              <input type="radio" name="llm-provider-choice" value="anthropic" onchange="handleProviderChoiceChange('anthropic')">
+              Anthropic / Claude
+            </label>
+            <label class="provider-option">
+              <input type="radio" name="llm-provider-choice" value="gemini" onchange="handleProviderChoiceChange('gemini')">
+              Google / Gemini
+            </label>
+            <label class="provider-option">
+              <input type="radio" name="llm-provider-choice" value="grok" onchange="handleProviderChoiceChange('grok')">
+              xAI / Grok
+            </label>
+          </div>
+          <label for="llm-model-select" data-i18n="llmModelLabel">모델 선택</label>
+          <select id="llm-model-select">
+            <option value="gpt-5.5">GPT-5.5</option>
+            <option value="gpt-5.4-mini">GPT-5.4 Mini</option>
+            <option value="gpt-4.1-mini">GPT-4.1 Mini</option>
+          </select>
+          <label for="llm-api-key">API Key</label>
+          <input id="llm-api-key" type="password" autocomplete="off" placeholder="sk-...">
+          <button type="submit" data-i18n="saveLlm">로컬 키 설정</button>
+        </form>
+        <p id="llm-status" data-i18n="llmChecking">LLM 키 상태를 확인 중입니다.</p>
+        <div id="live-status" data-i18n="liveIdle">StarCraft II 자동 연결 대기 중입니다.</div>
+        <div class="live-actions">
+          <button id="live-open-button" type="button" data-i18n="liveOpenButton" disabled>Live GUI 열기</button>
+          <button id="live-refresh-button" type="button" data-i18n="liveRefreshButton">연결 상태 확인</button>
+        </div>
+      </details>
     </section>
   </aside>
 </main>
@@ -718,8 +922,8 @@ var lastSeq = 0;
 var logBox = document.getElementById("log");
 var currentLang = "ko";
 var llmConfigured = false;
-var MAX_CHAT_EVENTS = 80;
-var COMPACT_AFTER_EVENTS = 48;
+var MAX_CHAT_EVENTS = 36;
+var COMPACT_AFTER_EVENTS = 28;
 var COMPACT_KEEP_EVENTS = 24;
 var trimmedChatEvents = 0;
 var recentEvents = [];
@@ -736,6 +940,50 @@ var pendingNodes = {};
 var latestState = null;
 var recognition = null;
 var isRecording = false;
+var liveGuiUrl = "";
+var LLM_MODELS = {
+  openai: [
+    { value: "gpt-5.5", label: "GPT-5.5" },
+    { value: "gpt-5.5-chat-latest", label: "GPT-5.5 Chat Latest" },
+    { value: "gpt-5.4", label: "GPT-5.4" },
+    { value: "gpt-5.4-mini", label: "GPT-5.4 Mini" },
+    { value: "gpt-5.4-nano", label: "GPT-5.4 Nano" },
+    { value: "gpt-5.1", label: "GPT-5.1" },
+    { value: "gpt-5.1-mini", label: "GPT-5.1 Mini" },
+    { value: "gpt-4.1", label: "GPT-4.1" },
+    { value: "gpt-4.1-mini", label: "GPT-4.1 Mini" },
+    { value: "gpt-4.1-nano", label: "GPT-4.1 Nano" },
+    { value: "gpt-4o", label: "GPT-4o" },
+    { value: "gpt-4o-mini", label: "GPT-4o Mini" }
+  ],
+  anthropic: [
+    { value: "claude-fable-4-5-20251001", label: "Claude Fable 4.5" },
+    { value: "claude-mythos-4-5-20251001", label: "Claude Mythos 4.5" },
+    { value: "claude-opus-4-8-20251201", label: "Claude Opus 4.8" },
+    { value: "claude-sonnet-4-6-20251120", label: "Claude Sonnet 4.6" },
+    { value: "claude-opus-4-5-20251101", label: "Claude Opus 4.5" },
+    { value: "claude-sonnet-4-5-20250929", label: "Claude Sonnet 4.5" },
+    { value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
+    { value: "claude-3-7-sonnet-latest", label: "Claude 3.7 Sonnet" }
+  ],
+  gemini: [
+    { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash" },
+    { value: "gemini-3.1-pro", label: "Gemini 3.1 Pro" },
+    { value: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash-Lite" },
+    { value: "gemini-3-flash", label: "Gemini 3 Flash" },
+    { value: "gemini-3-pro-preview", label: "Gemini 3 Pro Preview" },
+    { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+    { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+    { value: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite" }
+  ],
+  grok: [
+    { value: "grok-4.3", label: "Grok 4.3" },
+    { value: "grok-4.3-fast", label: "Grok 4.3 Fast" },
+    { value: "grok-build-0.1", label: "Grok Build 0.1" },
+    { value: "grok-4.1-fast", label: "Grok 4.1 Fast" },
+    { value: "grok-2-vision-1212", label: "Grok 2 Vision" }
+  ]
+};
 
 var I18N = {
   ko: {
@@ -798,7 +1046,17 @@ var I18N = {
     idleLabel: "유휴",
     llmTitle: "LLM 설정",
     llmHint: "API 키는 이 로컬 프로세스 메모리에만 보관됩니다.",
+    llmProviderLabel: "모델사 선택",
+    llmModelLabel: "모델 선택",
     llmChecking: "LLM 키 상태를 확인 중입니다.",
+    llmCheckingFailed: "LLM 키 상태 확인 실패",
+    llmSaving: "LLM 키 설정 중...",
+    liveStarting: "StarCraft II 연결 시작 중...",
+    liveReady: "StarCraft II 연결 준비됨",
+    liveFailed: "StarCraft II 자동 연결 실패",
+    liveIdle: "StarCraft II 자동 연결 대기 중입니다.",
+    liveOpenButton: "Live GUI 열기",
+    liveRefreshButton: "연결 상태 확인",
     llmReady: "LLM 키 설정됨",
     llmMissing: "LLM 필수: API 키를 먼저 설정해야 명령을 보낼 수 있습니다.",
     llmEnterKey: "API 키를 입력하세요.",
@@ -808,7 +1066,8 @@ var I18N = {
     commandPlaceholderReady: "대화하듯 입력하세요. 예: 보급고 지어 / 정찰보내",
     commandPlaceholderLocked: "LLM 키 설정 후 명령 입력이 활성화됩니다.",
     commandRejected: "LLM 키가 설정되지 않아 명령을 보내지 않았습니다.",
-    saveLlm: "로컬 키 설정"
+    saveLlm: "로컬 키 설정",
+    startupGuide: "🚀 시작 메뉴얼\\n1. 오른쪽 LLM 설정에서 모델사를 고르고 모델을 선택하세요.\\n2. API 키를 붙여넣고 로컬 키 설정을 누르세요. 키는 이 로컬 프로세스 메모리에만 저장됩니다.\\n3. 설정 성공 후 StarCraft II 자동 연결이 시작되고, 준비되면 이 탭이 실제 Live GUI로 전환됩니다.\\n4. 먼저 상태 알려줘 / 일꾼 계속 찍어 / 보급고 지어 처럼 입력해 보세요.\\n🎙️ 음성 버튼을 켜면 말한 내용이 채팅 입력으로 들어갑니다."
   },
   en: {
     eyebrow: "Live RTS Command Center",
@@ -870,7 +1129,17 @@ var I18N = {
     idleLabel: "idle",
     llmTitle: "LLM Settings",
     llmHint: "The API key is stored only in this local process memory.",
+    llmProviderLabel: "Provider",
+    llmModelLabel: "Model",
     llmChecking: "Checking LLM key status.",
+    llmCheckingFailed: "Failed to check LLM key status",
+    llmSaving: "Configuring LLM key...",
+    liveStarting: "Starting StarCraft II connection...",
+    liveReady: "StarCraft II connection ready",
+    liveFailed: "Failed to auto-connect StarCraft II",
+    liveIdle: "Waiting to auto-connect StarCraft II.",
+    liveOpenButton: "Open Live GUI",
+    liveRefreshButton: "Check Status",
     llmReady: "LLM key configured",
     llmMissing: "LLM required: configure an API key before sending commands.",
     llmEnterKey: "Enter an API key.",
@@ -880,7 +1149,8 @@ var I18N = {
     commandPlaceholderReady: "Type naturally. Example: build a supply depot / send scout",
     commandPlaceholderLocked: "Command input unlocks after LLM key setup.",
     commandRejected: "Command not sent because the LLM key is not configured.",
-    saveLlm: "Save Local Key"
+    saveLlm: "Save Local Key",
+    startupGuide: "🚀 Startup guide\\n1. Choose a provider and model in LLM Settings.\\n2. Paste your API key and press Save Local Key. The key stays only in this local process memory.\\n3. After success, StarCraft II auto-connect starts and this tab switches to the real Live GUI when ready.\\n4. Try: status, keep training SCVs, build a supply depot.\\n🎙️ Turn on voice to place recognized speech into the chat input."
   },
   zh: {
     eyebrow: "实时 RTS 指挥中心",
@@ -942,7 +1212,17 @@ var I18N = {
     idleLabel: "空闲",
     llmTitle: "LLM 设置",
     llmHint: "API key 只保存在本地进程内存中。",
+    llmProviderLabel: "模型供应商",
+    llmModelLabel: "模型",
     llmChecking: "正在检查 LLM key 状态。",
+    llmCheckingFailed: "LLM key 状态检查失败",
+    llmSaving: "正在设置 LLM key...",
+    liveStarting: "正在启动 StarCraft II 连接...",
+    liveReady: "StarCraft II 连接已就绪",
+    liveFailed: "StarCraft II 自动连接失败",
+    liveIdle: "正在等待自动连接 StarCraft II。",
+    liveOpenButton: "打开 Live GUI",
+    liveRefreshButton: "检查状态",
     llmReady: "LLM key 已设置",
     llmMissing: "必须先设置 LLM API key 才能发送命令。",
     llmEnterKey: "请输入 API key。",
@@ -952,7 +1232,8 @@ var I18N = {
     commandPlaceholderReady: "自然输入命令。例如：建造补给站 / 派出侦察",
     commandPlaceholderLocked: "设置 LLM key 后才能输入命令。",
     commandRejected: "LLM key 未设置，命令未发送。",
-    saveLlm: "保存本地 Key"
+    saveLlm: "保存本地 Key",
+    startupGuide: "🚀 启动指南\\n1. 在 LLM 设置中选择供应商和模型。\\n2. 粘贴 API key，然后点击保存本地 Key。Key 只保存在本地进程内存中。\\n3. 设置成功后会开始自动连接 StarCraft II，准备好后此标签页会切换到真实 Live GUI。\\n4. 可以先输入：查看状态 / 持续生产 SCV / 建造补给站。\\n🎙️ 开启语音后，识别到的话会进入聊天输入框。"
   }
 };
 
@@ -980,6 +1261,7 @@ function applyLanguage(lang) {
     button.classList.toggle("active", button.getAttribute("data-lang-button") === currentLang);
   });
   setCommandEnabled(llmConfigured);
+  renderStartupGuide();
   if (latestState) { renderStrategyBriefing(latestState); }
 }
 
@@ -1002,6 +1284,30 @@ function trimChatLog() {
     logBox.insertBefore(existingNote, logBox.firstElementChild);
   }
   existingNote.textContent = t("chatTrimmed") + " · " + trimmedChatEvents;
+}
+
+function renderStartupGuide() {
+  var existing = document.getElementById("startup-guide-entry");
+  if (!existing) {
+    existing = document.createElement("div");
+    existing.id = "startup-guide-entry";
+    existing.className = "log-entry";
+    var botMessage = document.createElement("div");
+    botMessage.className = "message message-bot";
+    var botMeta = document.createElement("span");
+    botMeta.className = "message-meta";
+    botMeta.textContent = t("commanderLabel");
+    botMessage.appendChild(botMeta);
+    var narration = document.createElement("span");
+    narration.className = "narration startup-guide-text";
+    botMessage.appendChild(narration);
+    existing.appendChild(botMessage);
+    logBox.insertBefore(existing, logBox.firstChild);
+  }
+  var meta = existing.querySelector(".message-meta");
+  var body = existing.querySelector(".startup-guide-text");
+  if (meta) { meta.textContent = t("commanderLabel"); }
+  if (body) { body.textContent = t("startupGuide"); }
 }
 
 function appendLog(ev) {
@@ -1229,22 +1535,22 @@ function renderStrategyBriefing(data) {
   briefing.appendChild(briefingBlock(t("briefingCurrentStrategy"), strategy));
   briefing.appendChild(briefingBlock(
     t("briefingProgress"),
-    t("briefingEconomy") + ": " + data.minerals + "M / " + data.vespene + "G, " + workers + t("workerUnit") + "\n" +
-    t("briefingSupply") + ": " + data.supply_used + "/" + data.supply_cap + " (" + (data.supply_left || 0) + ")\n" +
-    t("briefingForces") + ": " + (data.army_count || 0) + t("workerUnit") + "\n" +
-    t("briefingEnemy") + ": " + enemyLine + "\n" +
-    t("progressRecent") + ": " + (recentTexts.length ? recentTexts.join(" / ") : "-") + "\n" +
+    t("briefingEconomy") + ": " + data.minerals + "M / " + data.vespene + "G, " + workers + t("workerUnit") + "\\n" +
+    t("briefingSupply") + ": " + data.supply_used + "/" + data.supply_cap + " (" + (data.supply_left || 0) + ")\\n" +
+    t("briefingForces") + ": " + (data.army_count || 0) + t("workerUnit") + "\\n" +
+    t("briefingEnemy") + ": " + enemyLine + "\\n" +
+    t("progressRecent") + ": " + (recentTexts.length ? recentTexts.join(" / ") : "-") + "\\n" +
     "OK/Needs attention: " + successful + " / " + failed
   ));
   briefing.appendChild(briefingBlock(t("briefingMemory"), compactedContextSummary()));
-  briefing.appendChild(briefingBlock(t("briefingRisk"), risks.join("\n")));
+  briefing.appendChild(briefingBlock(t("briefingRisk"), risks.join("\\n")));
   var details = document.createElement("details");
   var summary = document.createElement("summary");
   summary.textContent = t("briefingAdvice");
   details.appendChild(summary);
   var advice = document.createElement("div");
   advice.className = "briefing-block";
-  advice.textContent = suggestions.join("\n");
+  advice.textContent = suggestions.join("\\n");
   details.appendChild(advice);
   briefing.appendChild(details);
 }
@@ -1258,10 +1564,10 @@ function compactedContextSummary() {
     .replace("{successful}", String(compactedContext.successful))
     .replace("{failed}", String(compactedContext.failed));
   if (compactedContext.commands.length) {
-    summary += "\n" + t("progressRecent") + ": " + compactedContext.commands.slice(-5).join(" / ");
+    summary += "\\n" + t("progressRecent") + ": " + compactedContext.commands.slice(-5).join(" / ");
   }
   if (compactedContext.lastNarration) {
-    summary += "\n" + compactedContext.lastNarration;
+    summary += "\\n" + compactedContext.lastNarration;
   }
   return summary;
 }
@@ -1306,10 +1612,10 @@ function pollState() {
 
 function renderLlmSettings(data) {
   if (!data) { return; }
-  if (data.provider) {
-    document.getElementById("llm-provider").value = data.provider;
+  if (data.configured) {
+    setSelectedLlmProvider(data.provider || "openai");
+    renderModelSelect(data.provider || "openai", data.model || "");
   }
-  document.getElementById("llm-model").value = data.model || "";
   llmConfigured = !!data.configured;
   setCommandEnabled(llmConfigured);
   setText(
@@ -1322,9 +1628,149 @@ function renderLlmSettings(data) {
 
 function pollLlmSettings() {
   fetch("/api/llm" + authQuery)
-    .then(function (response) { return response.json(); })
+    .then(parseJsonResponse)
     .then(renderLlmSettings)
-    .catch(function () {});
+    .catch(function (error) {
+      setText("llm-status", t("llmCheckingFailed") + ": " + error.message);
+    });
+}
+
+function parseJsonResponse(response) {
+  return response.text().then(function (text) {
+    var data = {};
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch (error) {
+        throw new Error("invalid JSON response: " + text.slice(0, 160));
+      }
+    }
+    if (!response.ok) {
+      throw new Error(data.error || ("HTTP " + response.status));
+    }
+    return data;
+  });
+}
+
+function selectedLlmChoice() {
+  var selectedProvider = document.querySelector("input[name='llm-provider-choice']:checked");
+  var modelSelect = document.getElementById("llm-model-select");
+  if (!selectedProvider) {
+    throw new Error("LLM provider is not selected.");
+  }
+  if (!modelSelect || !modelSelect.value) {
+    throw new Error("LLM model is not selected.");
+  }
+  return {
+    provider: selectedProvider.value || "openai",
+    model: modelSelect.value
+  };
+}
+
+function setSelectedLlmProvider(provider) {
+  var matched = false;
+  Array.prototype.forEach.call(document.querySelectorAll("input[name='llm-provider-choice']"), function (input) {
+    var isMatch = input.value === provider;
+    input.checked = isMatch;
+    matched = matched || isMatch;
+  });
+  if (!matched) {
+    var fallback = document.querySelector("input[name='llm-provider-choice'][value='openai']");
+    if (fallback) { fallback.checked = true; }
+  }
+}
+
+function selectedProviderValue() {
+  var selectedProvider = document.querySelector("input[name='llm-provider-choice']:checked");
+  return selectedProvider ? selectedProvider.value : "openai";
+}
+
+function handleProviderChoiceChange(provider) {
+  setSelectedLlmProvider(provider || "openai");
+  renderModelSelect(selectedProviderValue(), "");
+}
+
+function renderModelSelect(provider, selectedModel) {
+  var modelSelect = document.getElementById("llm-model-select");
+  var models = LLM_MODELS[provider] || LLM_MODELS.openai;
+  if (!modelSelect || !models.length) { return; }
+  modelSelect.innerHTML = "";
+  models.forEach(function (model) {
+    var option = document.createElement("option");
+    option.value = model.value;
+    option.textContent = model.label;
+    modelSelect.appendChild(option);
+  });
+  var wanted = selectedModel || models[0].value;
+  modelSelect.value = models.some(function (model) { return model.value === wanted; }) ? wanted : models[0].value;
+}
+
+function handleLiveStart(status) {
+  if (!status || !status.enabled) { return; }
+  if (status.status === "ready" && status.url) {
+    setLiveStatusLink(t("liveReady"), status.url);
+    window.location.assign(status.url);
+    return;
+  }
+  if (status.status === "failed") {
+    setLiveStatusText(t("liveFailed") + ": " + (status.error || status.last_line || "unknown error"));
+    return;
+  }
+  setLiveStatusText(t("liveStarting") + " (" + (status.status || "starting") + formatLivePid(status) + ")");
+  pollLiveStatus(0);
+}
+
+function pollLiveStatus(attempt) {
+  if (attempt > 90) {
+    setLiveStatusText(t("liveFailed") + ": timeout waiting for live GUI URL");
+    return;
+  }
+  window.setTimeout(function () {
+    fetch("/api/live/status" + authQuery)
+      .then(parseJsonResponse)
+      .then(function (status) {
+        if (status.status === "ready" && status.url) {
+          setLiveStatusLink(t("liveReady"), status.url);
+          window.location.assign(status.url);
+          return;
+        }
+        if (status.status === "failed") {
+          setLiveStatusText(t("liveFailed") + ": " + (status.error || status.last_line || "unknown error"));
+          return;
+        }
+        setLiveStatusText(t("liveStarting") + " (" + status.status + formatLivePid(status) + ")");
+        pollLiveStatus(attempt + 1);
+      })
+      .catch(function (error) {
+        setLiveStatusText(t("liveFailed") + ": " + error.message);
+      });
+  }, 1000);
+}
+
+function setLiveStatusLink(label, url) {
+  liveGuiUrl = url || "";
+  var statusNode = document.getElementById("live-status");
+  statusNode.textContent = label + ": ";
+  var link = document.createElement("a");
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noopener";
+  link.textContent = url;
+  statusNode.appendChild(link);
+  setLiveButtonEnabled(true);
+}
+
+function setLiveStatusText(text) {
+  document.getElementById("live-status").textContent = text;
+  setLiveButtonEnabled(!!liveGuiUrl);
+}
+
+function setLiveButtonEnabled(enabled) {
+  document.getElementById("live-open-button").disabled = !enabled;
+}
+
+function formatLivePid(status) {
+  return status && status.pid ? ", pid " + status.pid : "";
 }
 
 document.getElementById("command-form").addEventListener("submit", function (event) {
@@ -1357,29 +1803,39 @@ Array.prototype.forEach.call(document.querySelectorAll("[data-command]"), functi
 document.getElementById("llm-form").addEventListener("submit", function (event) {
   event.preventDefault();
   var keyInput = document.getElementById("llm-api-key");
+  var choice;
+  try {
+    choice = selectedLlmChoice();
+  } catch (error) {
+    setText("llm-status", error.message);
+    return;
+  }
   var payload = {
-    provider: document.getElementById("llm-provider").value,
-    model: document.getElementById("llm-model").value.trim(),
+    provider: choice.provider,
+    model: choice.model,
     api_key: keyInput.value.trim()
   };
   if (!payload.api_key) {
     setText("llm-status", t("llmEnterKey"));
     return;
   }
+  setText("llm-status", t("llmSaving"));
   fetch("/api/llm" + authQuery, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
-  }).then(function (response) { return response.json(); })
+  }).then(parseJsonResponse)
     .then(function (data) {
       keyInput.value = "";
-      if (data.error) {
-        setText("llm-status", data.error);
-        return;
-      }
       renderLlmSettings(data);
+      if (data.configured) {
+        setText("llm-status", t("llmReady") + " (" + data.provider + " / " + data.model + ")");
+      }
+      handleLiveStart(data.live_start);
     })
-    .catch(function () { setText("llm-status", t("llmSaveFailed")); });
+    .catch(function (error) {
+      setText("llm-status", t("llmSaveFailed") + ": " + error.message);
+    });
 });
 
 Array.prototype.forEach.call(document.querySelectorAll("[data-lang-button]"), function (button) {
@@ -1388,6 +1844,33 @@ Array.prototype.forEach.call(document.querySelectorAll("[data-lang-button]"), fu
     pollState();
     pollLlmSettings();
   });
+});
+
+var providerOptions = document.getElementById("llm-provider-options");
+providerOptions.addEventListener("click", function (event) {
+  var target = event.target;
+  var input = target && target.closest ? target.closest("input[name='llm-provider-choice']") : null;
+  if (!input && target && target.closest) {
+    var label = target.closest(".provider-option");
+    input = label ? label.querySelector("input[name='llm-provider-choice']") : null;
+  }
+  if (input) { handleProviderChoiceChange(input.value); }
+});
+Array.prototype.forEach.call(document.querySelectorAll("input[name='llm-provider-choice']"), function (input) {
+  input.addEventListener("change", function () { handleProviderChoiceChange(input.value); });
+});
+
+document.getElementById("live-open-button").addEventListener("click", function () {
+  if (liveGuiUrl) { window.open(liveGuiUrl, "_blank", "noopener"); }
+});
+
+document.getElementById("live-refresh-button").addEventListener("click", function () {
+  fetch("/api/live/status" + authQuery)
+    .then(parseJsonResponse)
+    .then(handleLiveStart)
+    .catch(function (error) {
+      setLiveStatusText(t("liveFailed") + ": " + error.message);
+    });
 });
 
 function setupVoiceInput() {
@@ -1440,6 +1923,7 @@ function setupVoiceInput() {
 setInterval(pollHistory, POLL_INTERVAL_MS);
 setInterval(pollState, POLL_INTERVAL_MS);
 applyLanguage("ko");
+renderModelSelect(selectedProviderValue(), "");
 setupVoiceInput();
 pollHistory();
 pollState();
@@ -1514,6 +1998,9 @@ class _WebGuiRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/llm":
             self._handle_llm_status()
+            return
+        if path == "/api/live/status":
+            self._handle_live_status()
             return
         self._send_not_found()
 
@@ -1674,7 +2161,22 @@ class _WebGuiRequestHandler(BaseHTTPRequestHandler):
                 {"configured": False, "error": str(error)},
             )
             return
-        self._send_json(HTTPStatus.OK, dict(snapshot))
+        response = dict(snapshot)
+        if bool(getattr(self.server, "auto_launch_live", False)):  # type: ignore[attr-defined]
+            launcher = getattr(self.server, "live_launcher", None)  # type: ignore[attr-defined]
+            if launcher is not None:
+                response["live_start"] = launcher.start(provider, api_key, model)
+        self._send_json(HTTPStatus.OK, response)
+
+    def _handle_live_status(self) -> None:
+        launcher = getattr(self.server, "live_launcher", None)  # type: ignore[attr-defined]
+        if launcher is None:
+            self._send_json(
+                HTTPStatus.OK,
+                {"enabled": False, "status": "disabled", "url": "", "error": ""},
+            )
+            return
+        self._send_json(HTTPStatus.OK, launcher.snapshot())
 
     def _read_request_body(self) -> bytes | None:
         """Read the request body; ``None`` marks malformed/oversized input."""
@@ -1757,6 +2259,7 @@ class _WebGuiRequestHandler(BaseHTTPRequestHandler):
         self.send_response(int(status))
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -1777,6 +2280,7 @@ class WebGuiServer:
         port: int = DEFAULT_WEB_GUI_PORT,
         host: str = WEB_GUI_HOST,
         auth_token: str = "",
+        auto_launch_live: bool = False,
     ) -> None:
         if not isinstance(bridge, WebGuiBridgeInterface):
             raise TypeError(
@@ -1801,6 +2305,8 @@ class WebGuiServer:
         self._requested_port = port
         self._host = cleaned_host
         self._auth_token = cleaned_token
+        self._auto_launch_live = bool(auto_launch_live)
+        self._live_launcher = _LiveLaunchManager() if self._auto_launch_live else None
         self._lifecycle_lock = threading.Lock()
         self._http: _BridgedThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -1850,6 +2356,8 @@ class WebGuiServer:
                 self._bridge,
                 self._auth_token,
             )
+            self._http.auto_launch_live = self._auto_launch_live  # type: ignore[attr-defined]
+            self._http.live_launcher = self._live_launcher  # type: ignore[attr-defined]
             self._thread = threading.Thread(
                 target=self._http.serve_forever,
                 kwargs={"poll_interval": 0.1},
@@ -1944,14 +2452,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Lazy import: reuse the demo's dry-run wiring (scripted DemoFakeBotAI +
     # adapter + executor + session) instead of duplicating it here.
     from starcraft_commander.demo_sc2 import MVP_DEMO_COMMAND, build_dry_run_session
+    from starcraft_commander.llm_interpreter import (
+        HybridCommandInterpreter,
+        LocalLLMControl,
+    )
 
-    session, _bot = build_dry_run_session()
-    bridge = SessionLoopBridge(session=session)
+    llm_control = LocalLLMControl()
+    interpreter = HybridCommandInterpreter(llm_interpreter=llm_control)
+    session, _bot = build_dry_run_session(interpreter=interpreter)
+    bridge = SessionLoopBridge(session=session, llm_control=llm_control)
     server = WebGuiServer(
         bridge=bridge,
         port=args.port,
         host=args.host,
         auth_token=args.token,
+        auto_launch_live=True,
     )
     bridge.start()
     try:
