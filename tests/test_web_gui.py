@@ -122,6 +122,8 @@ class WebGuiServerHTTPTest(unittest.TestCase):
             "/api/state",
             "/api/command",
             "전송",
+            "커맨더 채팅",
+            "전장 대시보드",
             "setInterval(pollHistory",
             "setInterval(pollState",
         ):
@@ -494,6 +496,8 @@ class RenderWebGuiPageTest(unittest.TestCase):
         for fragment in (
             WEB_GUI_PAGE_TITLE,
             "커맨더",
+            "대시보드",
+            "커맨더 채팅",
             "전송",
             "미네랄",
             "가스",

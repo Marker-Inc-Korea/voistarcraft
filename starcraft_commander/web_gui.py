@@ -396,85 +396,199 @@ _WEB_GUI_PAGE_TEMPLATE: Final[str] = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__TITLE__</title>
 <style>
-  :root { color-scheme: light; }
+  :root {
+    color-scheme: light;
+    --ink: #17212b;
+    --muted: #607080;
+    --panel: rgba(255, 255, 255, 0.86);
+    --panel-strong: #ffffff;
+    --line: rgba(33, 47, 61, 0.12);
+    --accent: #0f766e;
+    --accent-dark: #0b5f59;
+    --amber: #b7791f;
+    --red: #b42318;
+    --blue: #1d4ed8;
+    --shadow: 0 24px 70px rgba(17, 24, 39, 0.14);
+  }
   * { box-sizing: border-box; }
   body {
-    margin: 0; padding: 16px; background: #f4f6f8; color: #20262c;
-    font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+    margin: 0; min-height: 100vh; padding: 22px; color: var(--ink);
+    font-family: "Avenir Next", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+    background:
+      radial-gradient(circle at 12% 10%, rgba(15, 118, 110, 0.22), transparent 32%),
+      radial-gradient(circle at 92% 12%, rgba(183, 121, 31, 0.18), transparent 28%),
+      linear-gradient(135deg, #edf7f2 0%, #f6efe1 48%, #e8eef7 100%);
   }
-  h1 { margin: 0 0 4px; font-size: 1.5rem; }
-  p.hint { margin: 0 0 12px; color: #5b6570; font-size: 0.9rem; }
-  main { display: flex; gap: 16px; align-items: stretch; }
-  #command-panel { flex: 3; display: flex; flex-direction: column; min-width: 0; }
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; opacity: 0.28;
+    background-image:
+      linear-gradient(rgba(23, 33, 43, 0.06) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(23, 33, 43, 0.06) 1px, transparent 1px);
+    background-size: 34px 34px;
+  }
+  .app-shell { position: relative; z-index: 1; max-width: 1480px; margin: 0 auto; }
+  .hero {
+    display: flex; align-items: flex-end; justify-content: space-between; gap: 18px;
+    margin-bottom: 18px;
+  }
+  .eyebrow {
+    margin: 0 0 8px; color: var(--accent-dark); font-weight: 800;
+    letter-spacing: 0.12em; text-transform: uppercase; font-size: 0.76rem;
+  }
+  h1 { margin: 0; font-size: clamp(2rem, 4vw, 4.2rem); line-height: 0.95; letter-spacing: -0.06em; }
+  p.hint { margin: 8px 0 0; color: var(--muted); font-size: 0.95rem; }
+  .connection-pill {
+    flex: 0 0 auto; padding: 10px 14px; border: 1px solid var(--line);
+    border-radius: 999px; background: rgba(255, 255, 255, 0.72);
+    box-shadow: 0 10px 30px rgba(17, 24, 39, 0.08); font-weight: 800;
+  }
+  main { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(330px, 0.75fr); gap: 18px; align-items: stretch; }
+  #command-panel {
+    min-width: 0; display: flex; flex-direction: column; overflow: hidden;
+    min-height: min(740px, calc(100vh - 150px)); border: 1px solid var(--line);
+    border-radius: 28px; background: var(--panel); box-shadow: var(--shadow);
+    backdrop-filter: blur(18px);
+  }
+  .chat-header {
+    display: flex; justify-content: space-between; gap: 12px; align-items: center;
+    padding: 18px 20px; border-bottom: 1px solid var(--line);
+    background: linear-gradient(90deg, rgba(15, 118, 110, 0.12), rgba(255, 255, 255, 0.26));
+  }
+  .chat-title { margin: 0; font-size: 1rem; font-weight: 900; }
+  .chat-subtitle { margin: 3px 0 0; color: var(--muted); font-size: 0.82rem; }
+  .quick-commands { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  .quick-commands button {
+    border: 1px solid rgba(15, 118, 110, 0.24); background: #ffffff; color: var(--accent-dark);
+    border-radius: 999px; padding: 8px 10px; font-weight: 800; cursor: pointer;
+  }
   #state-panel {
-    flex: 1; min-width: 220px; background: #ffffff; border: 1px solid #d6dde4;
-    border-radius: 8px; padding: 12px 16px;
+    min-width: 0; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 28px; padding: 18px; box-shadow: var(--shadow); backdrop-filter: blur(18px);
   }
-  #state-panel h2 { margin: 0 0 8px; font-size: 1.05rem; }
-  #state-panel dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; }
-  #state-panel dt { font-weight: 600; color: #44505c; }
-  #state-panel dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
-  #state-availability { margin: 10px 0 0; font-size: 0.8rem; color: #8a939c; }
+  #state-panel h2, #llm-panel h2 { margin: 0 0 10px; font-size: 1rem; letter-spacing: -0.02em; }
+  .dashboard-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .metric-card {
+    min-height: 86px; padding: 13px; border-radius: 20px; background: var(--panel-strong);
+    border: 1px solid var(--line); position: relative; overflow: hidden;
+  }
+  .metric-card::after {
+    content: ""; position: absolute; right: -20px; top: -26px; width: 70px; height: 70px;
+    border-radius: 50%; background: rgba(15, 118, 110, 0.12);
+  }
+  .metric-card dt { margin: 0 0 8px; color: var(--muted); font-weight: 800; font-size: 0.76rem; }
+  .metric-card dd { margin: 0; font-size: 1.28rem; font-weight: 900; font-variant-numeric: tabular-nums; }
+  .wide-card { grid-column: 1 / -1; }
+  #state-availability { margin: 12px 0 0; font-size: 0.82rem; color: var(--muted); }
   #llm-panel {
-    margin-top: 16px; padding-top: 14px; border-top: 1px solid #e1e6eb;
+    margin-top: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 22px;
+    background: rgba(255, 255, 255, 0.74);
   }
-  #llm-panel label { display: block; margin: 8px 0 4px; font-size: 0.82rem; font-weight: 700; color: #44505c; }
+  #llm-panel label { display: block; margin: 8px 0 4px; font-size: 0.78rem; font-weight: 900; color: var(--muted); }
   #llm-panel select, #llm-panel input {
-    width: 100%; padding: 8px 10px; border: 1px solid #b9c5d0; border-radius: 6px;
+    width: 100%; padding: 10px 11px; border: 1px solid rgba(96, 112, 128, 0.28);
+    border-radius: 12px; background: rgba(255, 255, 255, 0.9);
   }
   #llm-panel button {
-    width: 100%; margin-top: 10px; padding: 9px 10px; border: none; border-radius: 6px;
-    background: #20262c; color: #ffffff; font-weight: 700; cursor: pointer;
+    width: 100%; margin-top: 10px; padding: 11px 12px; border: none; border-radius: 14px;
+    background: var(--ink); color: #ffffff; font-weight: 900; cursor: pointer;
   }
-  #llm-status { margin: 8px 0 0; font-size: 0.78rem; color: #5b6570; }
+  #llm-status { margin: 8px 0 0; font-size: 0.78rem; color: var(--muted); }
   #log {
-    flex: 1; min-height: 320px; max-height: 60vh; overflow-y: auto;
-    background: #ffffff; border: 1px solid #d6dde4; border-radius: 8px;
-    padding: 12px; margin-bottom: 12px;
+    flex: 1; min-height: 360px; overflow-y: auto; padding: 20px;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.36), rgba(255, 255, 255, 0.1)),
+      radial-gradient(circle at 20% 20%, rgba(15, 118, 110, 0.08), transparent 32%);
   }
-  .log-entry { padding: 6px 4px; border-bottom: 1px solid #eef1f4; }
-  .log-entry .command-text { color: #8a939c; font-size: 0.8rem; margin-bottom: 2px; }
-  .log-entry .status { font-weight: 700; margin-right: 6px; white-space: nowrap; }
+  .log-entry { display: grid; gap: 8px; margin: 0 0 16px; }
+  .message {
+    max-width: min(74ch, 86%); padding: 12px 14px; border-radius: 18px;
+    box-shadow: 0 10px 24px rgba(17, 24, 39, 0.08); white-space: pre-wrap;
+  }
+  .message-user {
+    justify-self: end; color: #ffffff; background: linear-gradient(135deg, var(--accent), var(--accent-dark));
+    border-bottom-right-radius: 6px;
+  }
+  .message-bot {
+    justify-self: start; background: #ffffff; border: 1px solid var(--line);
+    border-bottom-left-radius: 6px;
+  }
+  .message-meta { display: block; margin-bottom: 5px; color: rgba(255, 255, 255, 0.72); font-size: 0.74rem; font-weight: 800; }
+  .message-bot .message-meta { color: var(--muted); }
+  .status { display: inline-block; font-weight: 900; margin-right: 7px; white-space: nowrap; }
   .status-executed { color: __COLOR_EXECUTED__; }
   .status-partially_executed { color: __COLOR_PARTIAL__; }
   .status-blocked { color: __COLOR_BLOCKED__; }
   .status-clarification { color: __COLOR_CLARIFICATION__; }
   .status-read_only { color: __COLOR_READ_ONLY__; }
-  #command-form { display: flex; gap: 8px; }
+  #command-form {
+    display: flex; gap: 10px; padding: 16px; border-top: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.72);
+  }
   #command-input {
-    flex: 1; font-size: 1.15rem; padding: 12px 14px;
-    border: 2px solid #9fb4c7; border-radius: 8px;
+    flex: 1; font-size: 1.02rem; padding: 14px 16px;
+    border: 1px solid rgba(96, 112, 128, 0.28); border-radius: 18px; background: #ffffff;
   }
-  #command-input:focus { outline: none; border-color: #1565c0; }
+  #command-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.12); }
   #send-button {
-    font-size: 1.1rem; font-weight: 700; padding: 12px 24px; border: none;
-    border-radius: 8px; background: #1565c0; color: #ffffff; cursor: pointer;
+    font-size: 1rem; font-weight: 900; padding: 12px 22px; border: none;
+    border-radius: 18px; background: var(--accent); color: #ffffff; cursor: pointer;
   }
-  #send-button:hover { background: #0d4f9e; }
+  #send-button:hover { background: var(--accent-dark); }
+  @media (max-width: 980px) {
+    body { padding: 12px; }
+    .hero { display: block; }
+    .connection-pill { display: inline-block; margin-top: 12px; }
+    main { grid-template-columns: 1fr; }
+    #command-panel { min-height: 68vh; }
+    .dashboard-grid { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 620px) {
+    .dashboard-grid { grid-template-columns: 1fr; }
+    #command-form { flex-direction: column; }
+    .message { max-width: 94%; }
+  }
 </style>
 </head>
 <body>
-<h1>__TITLE__</h1>
-<p class="hint">한국어 명령을 입력하고 Enter 또는 전송 버튼을 누르세요.
-예: 마린 6기 입구로 보내고 SCV 계속 찍어</p>
+<div class="app-shell">
+<header class="hero">
+  <div>
+    <p class="eyebrow">Live RTS Command Center</p>
+    <h1>__TITLE__</h1>
+    <p class="hint">대화하듯 명령하고, 우측 대시보드에서 전장 상태를 확인하세요.</p>
+  </div>
+  <div class="connection-pill" id="connection-status">SC2 연결 확인 중</div>
+</header>
 <main>
-  <section id="command-panel">
-    <div id="log" aria-live="polite"></div>
+  <section id="command-panel" aria-label="대화형 명령 채팅">
+    <div class="chat-header">
+      <div>
+        <p class="chat-title">커맨더 채팅</p>
+        <p class="chat-subtitle">명령, 질문, 상태 확인을 한 창에서 처리합니다.</p>
+      </div>
+      <div class="quick-commands">
+        <button type="button" data-command="상태확인">상태확인</button>
+        <button type="button" data-command="정찰보내">정찰보내</button>
+        <button type="button" data-command="SCV 여러개 뽑아">SCV 생산</button>
+        <button type="button" data-command="건물 위치 지정 가능?">위치 질문</button>
+      </div>
+    </div>
+    <div id="log" aria-live="polite" role="log"></div>
     <form id="command-form">
       <input id="command-input" type="text" autocomplete="off" autofocus
-             placeholder="명령을 입력하세요 (예: SCV 계속 찍어)">
+             placeholder="대화하듯 입력하세요. 예: 보급고 지어 / 음성지원도 되나?">
       <button type="submit" id="send-button">전송</button>
     </form>
   </section>
   <aside id="state-panel">
-    <h2>전장 상태</h2>
-    <dl>
-      <dt>미네랄</dt><dd id="state-minerals">-</dd>
-      <dt>가스</dt><dd id="state-vespene">-</dd>
-      <dt>보급</dt><dd id="state-supply">-</dd>
-      <dt>일꾼</dt><dd id="state-workers">-</dd>
-      <dt>병력</dt><dd id="state-army">-</dd>
-      <dt>건물</dt><dd id="state-structures">-</dd>
+    <h2>전장 대시보드</h2>
+    <dl class="dashboard-grid">
+      <div class="metric-card"><dt>미네랄</dt><dd id="state-minerals">-</dd></div>
+      <div class="metric-card"><dt>가스</dt><dd id="state-vespene">-</dd></div>
+      <div class="metric-card"><dt>보급</dt><dd id="state-supply">-</dd></div>
+      <div class="metric-card"><dt>일꾼</dt><dd id="state-workers">-</dd></div>
+      <div class="metric-card"><dt>병력</dt><dd id="state-army">-</dd></div>
+      <div class="metric-card wide-card"><dt>건물</dt><dd id="state-structures">-</dd></div>
     </dl>
     <p id="state-availability"></p>
     <section id="llm-panel">
@@ -496,6 +610,7 @@ _WEB_GUI_PAGE_TEMPLATE: Final[str] = """<!DOCTYPE html>
     </section>
   </aside>
 </main>
+</div>
 <script>
 "use strict";
 var POLL_INTERVAL_MS = __POLL_MS__;
@@ -509,19 +624,30 @@ function appendLog(ev) {
   var entry = document.createElement("div");
   entry.className = "log-entry";
   if (ev.command_text) {
-    var command = document.createElement("div");
-    command.className = "command-text";
-    command.textContent = "명령: " + ev.command_text;
-    entry.appendChild(command);
+    var userMessage = document.createElement("div");
+    userMessage.className = "message message-user";
+    var userMeta = document.createElement("span");
+    userMeta.className = "message-meta";
+    userMeta.textContent = "사용자";
+    userMessage.appendChild(userMeta);
+    userMessage.appendChild(document.createTextNode(ev.command_text));
+    entry.appendChild(userMessage);
   }
+  var botMessage = document.createElement("div");
+  botMessage.className = "message message-bot";
+  var botMeta = document.createElement("span");
+  botMeta.className = "message-meta";
+  botMeta.textContent = "커맨더";
+  botMessage.appendChild(botMeta);
   var status = document.createElement("span");
   status.className = "status status-" + (ev.status || "clarification");
   status.textContent = "[" + (ev.status || "?") + "]";
-  entry.appendChild(status);
+  botMessage.appendChild(status);
   var narration = document.createElement("span");
   narration.className = "narration";
   narration.textContent = ev.narration || "";
-  entry.appendChild(narration);
+  botMessage.appendChild(narration);
+  entry.appendChild(botMessage);
   logBox.appendChild(entry);
   logBox.scrollTop = logBox.scrollHeight;
 }
@@ -545,6 +671,7 @@ function setText(id, value) {
 function renderState(data) {
   if (!data || data.available === false) {
     setText("state-availability", "게임 상태를 아직 읽을 수 없습니다.");
+    setText("connection-status", "SC2 상태 대기 중");
     return;
   }
   setText("state-minerals", String(data.minerals));
@@ -562,6 +689,7 @@ function renderState(data) {
     "state-availability",
     data.observation_complete === false ? "관측이 불완전합니다." : ""
   );
+  setText("connection-status", "SC2 연결됨 · " + Math.floor(data.game_time_seconds || 0) + "초");
 }
 
 function pollState() {
@@ -604,6 +732,14 @@ document.getElementById("command-form").addEventListener("submit", function (eve
   }).then(function () { pollHistory(); }).catch(function () {});
   input.value = "";
   input.focus();
+});
+
+Array.prototype.forEach.call(document.querySelectorAll("[data-command]"), function (button) {
+  button.addEventListener("click", function () {
+    var input = document.getElementById("command-input");
+    input.value = button.getAttribute("data-command") || "";
+    input.focus();
+  });
 });
 
 document.getElementById("llm-form").addEventListener("submit", function (event) {
