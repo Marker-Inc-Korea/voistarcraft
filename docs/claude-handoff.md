@@ -299,11 +299,13 @@ docs/roadmap-llm-gui.md
 
 Implemented:
 
-- Rules-first LLM fallback via the optional `anthropic` extra, schema-gated to
-  the 10 canonical intents and called only once per user utterance.
+- Rules-first LLM fallback via the optional `[llm]` extra, schema-gated to the
+  10 canonical intents and called only once per user utterance. OpenAI/GPT is
+  the default local GUI provider; Anthropic remains supported.
 - Thread-safe bounded event memory for GUI history and state-report
   enrichment.
-- Stdlib localhost-only web GUI for dry-run and live sessions.
+- Stdlib localhost-first web GUI for dry-run and live sessions, including
+  process-local API key configuration via `GET/POST /api/llm`.
 - Code-driven standing orders for continuous SCV production and supply-block
   prevention, ticked from `on_step` rather than the LLM.
 - Brood War semantic executor boundary with BWAPI Terran vocabulary and
@@ -314,8 +316,9 @@ Implemented:
 `docs/sc2-smoke-test.md` documents the SC2 install paths (`SC2PATH`), map
 download/placement, `pip install 'voistarcraft[sc2]'` / `[voice]`, the dry-run
 and live commands, the five-step smoke-test acceptance list, and known
-limitations. Note: the document exists, but the live run has not yet been
-performed against a real installed game.
+limitations. A local macOS smoke run has reached `Status.in_game` and verified
+localhost GUI state polling plus command execution for state check, SCV
+production, scouting, mineral gathering, and Supply Depot construction.
 
 ## Hardening Decisions From This Session
 
@@ -356,16 +359,15 @@ Record of contract decisions the next agent must preserve:
 
 The project compiles, tests, and dry-runs the full pipeline, but:
 
-- **Real-game smoke test.** Nobody has run
-  `python3 -m starcraft_commander.demo_sc2 --map AcropolisLE` against an
-  installed StarCraft II. Executing `docs/sc2-smoke-test.md` end to end on a
-  machine with SC2 is the top next task; expect python-sc2 API mismatches that
-  the duck-typed fakes did not catch.
+- **Broader real-game smoke tests.** One macOS local SC2 smoke run is verified;
+  repeat `docs/sc2-smoke-test.md` on other machines, maps, and OSes because
+  python-sc2 API and map-derivation edge cases can still differ from the local
+  setup.
 - **Real BWAPI adapter.** The Brood War semantic executor boundary exists, but
   a live BWAPI binding adapter still requires a Brood War + BWAPI machine.
-- **Live Anthropic API verification.** The LLM fallback is covered by injected
-  client tests; a real API call requires `ANTHROPIC_API_KEY` and has not been
-  run here.
+- **Broader live LLM API verification.** Web key configuration has been
+  verified locally without exposing the key; broader real model checks across
+  OpenAI and Anthropic still depend on the user's available API credentials.
 - **Multi-race.** Terran-only MVP: costs, producers, and Korean vocabulary
   cover SCV/Marine/Hellion and the basic Terran structures.
 

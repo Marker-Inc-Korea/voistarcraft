@@ -7,12 +7,11 @@ the `MissingSC2RuntimeError` install hint and `pyproject.toml`.
 말하면 스타가 움직인다: 이 문서는 실제 StarCraft II 게임에서 한국어 음성/텍스트
 명령 데모를 실행하는 로컬 절차를 설명합니다.
 
-**Honest status up front:** live mode is implemented but has **not** been
-smoke-tested against a real StarCraft II game in this development
-environment (no StarCraft II install available here). Everything below the
-dry-run section describes the intended, code-verified behavior against
-BotAI-like fakes. You, the developer with a local install, are running the
-first real smoke test — please report what breaks.
+**Honest status up front:** live mode has been smoke-tested on macOS against
+the local install at `/Users/jinminseong/Desktop/StarCraft2/StarCraft II` with
+`AcropolisLE`. The smoke covered game launch, `Status.in_game`, localhost GUI
+state polling, process-local OpenAI key configuration status, SCV production,
+SCV scouting, mineral gathering, and Supply Depot construction.
 
 ## 1. Requirements
 
@@ -62,6 +61,13 @@ package. Optional voice input additionally needs:
 ```bash
 pip install 'voistarcraft[voice]'
 # or: pip install faster-whisper sounddevice
+```
+
+Live mode also requires `[llm]`:
+
+```bash
+pip install 'voistarcraft[llm]'
+# installs OpenAI and Anthropic SDK support
 ```
 
 ## 2. How to run
@@ -115,16 +121,35 @@ python3 -m starcraft_commander.demo_sc2 --map AcropolisLE --difficulty easy
   iteration, not instantly at the prompt.
 - Exit command input with `종료`, `quit`, or EOF; the game keeps running.
 
+For local browser control and web-entered API keys:
+
+```bash
+SC2PATH="/Users/jinminseong/Desktop/StarCraft2/StarCraft II" \
+python3 -m starcraft_commander.demo_sc2 \
+  --map AcropolisLE --difficulty easy \
+  --gui
+```
+
+- Open the printed `http://127.0.0.1:PORT` URL.
+- Enter the OpenAI key in **LLM 설정**. The key stays in the running Python
+  process memory only; `/api/llm` returns status metadata, never the key.
+- Defaults: `--llm-provider openai`, `--llm-model gpt-4.1-mini`.
+- Use windowed/borderless StarCraft II or a second monitor so the browser
+  remains usable while the game is running.
+
 ### Expected behavior (smoke-test acceptance)
 
 Mirrors the MVP completion definition in `docs/claude-handoff.md`:
 
 1. The game launches and the bot loads without errors.
-2. `상태 알려줘` narrates live minerals/supply/army state in Korean.
-3. `SCV 계속 찍어` issues a real train order (and honestly discloses that
-   continuous production is a one-shot order today).
-4. `보급고 지어` places a Supply Depot near the ramp.
-5. `마린 6기 입구로 보내` attack-moves Marines to your ramp, narrating the
+2. `상태 알려줘` or `상태확인` narrates live minerals/supply/army state in Korean.
+3. `SCV 계속 찍어` issues a real train order; `SCV 여러개 뽑아` queues 3 SCVs
+   when resources and producer availability allow it.
+4. `보급고 지어`, `보급고 건설해`, or `SCV로 보급고 설치해` places a Supply
+   Depot near the ramp.
+5. `정찰보내` moves one SCV toward the enemy front.
+6. `자원채취` assigns three workers to minerals.
+7. `마린 6기 입구로 보내` attack-moves Marines to your ramp, narrating the
    honest issued count when fewer than six exist.
 
 ## 3. Voice mode
@@ -199,15 +224,15 @@ executing, so the failure is safe — just re-record.
 
 Be aware of exactly how small this MVP is:
 
-- **Live mode is untested against a real game.** All live-path code is
-  verified only against BotAI-like fakes in unit tests; this guide's live
-  section has not yet been executed against a real StarCraft II install in
-  the development environment. Expect rough edges on first contact.
+- **Live mode has only one local smoke environment so far.** The current
+  verified setup is macOS + `/Users/jinminseong/Desktop/StarCraft2/StarCraft II`
+  + `AcropolisLE`; other OSes, maps, and ladder scenarios can still expose
+  python-sc2 or map-derivation edge cases.
 - **Terran only**, one fixed map per run, local built-in AI opponent
   (`--race terran` is the only accepted value).
-- **Exactly 10 intents.** Interpretation is deterministic keyword matching
-  over the inventory in `docs/intent-inventory.md`; no LLM is called, ever
-  (and certainly not per frame).
+- **Exactly 10 intents.** Rule interpretation and LLM output are both gated to
+  the inventory in `docs/intent-inventory.md`; the LLM can run only per user
+  utterance, never per frame.
 - **One intent per utterance, with a splitting heuristic.** Compound
   commands are split on `그리고`/`하고` and on curated sequential verb
   endings (`...보내고 ...찍어`). The heuristic is conservative (nouns like

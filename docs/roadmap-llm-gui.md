@@ -31,11 +31,19 @@ voice), the system interprets it and maps it to StarCraft II API actions.
 - Baseline suite at start of this phase: 636 passed, 1475 subtests.
 - Final offline suite after this phase: 811 passed, 1757 subtests.
 
+## Follow-up verification (2026-06-14)
+
+- `[llm]` now includes both OpenAI and Anthropic SDK support.
+- Live GUI defaults to OpenAI/GPT (`gpt-4.1-mini`) and accepts API keys through
+  the localhost web UI without writing them to disk.
+- Final offline suite after local web-key and Korean alias work: 820 passed,
+  4 skipped, 1763 subtests.
+
 ## Work items and status
 
 - [x] **W1. LLM interpreter** (`starcraft_commander/llm_interpreter.py` +
   `tests/test_llm_interpreter.py` + `pyproject.toml` llm extra +
-  `runtime_deps.require_anthropic`)
+  `runtime_deps.require_anthropic` / `runtime_deps.require_openai`)
   - `LLMCommandInterpreter` implements the existing
     `CommandInterpreterInterface` seam (interpret(text) →
     `CommandInterpretationResult`). Forced tool-use against a JSON schema
@@ -45,16 +53,18 @@ voice), the system interprets it and maps it to StarCraft II API actions.
   - `HybridCommandInterpreter`: rules first (fast, free, deterministic);
     LLM fallback only on unsupported/ambiguous; LLM failure → existing
     Korean clarification.
-  - Default model `claude-haiku-4-5-20251001` (override via constructor/env),
-    key from `ANTHROPIC_API_KEY`.
+  - OpenAI/GPT is the default local GUI provider (`gpt-4.1-mini`), with
+    Anthropic still supported. Keys can come from local env vars or the
+    localhost web GUI; web-entered keys stay in process memory.
 - [x] **W2. Event memory** (`starcraft_commander/event_memory.py` +
   `tests/test_event_memory.py`) — thread-safe ring buffer of command
   outcomes with game time; feeds GUI history.
 - [x] **W3. Web GUI** (`starcraft_commander/web_gui.py` +
   `tests/test_web_gui.py`) — stdlib ThreadingHTTPServer, embedded Korean
   single-page UI; endpoints `GET /` (HTML), `GET /api/state`,
-  `GET /api/history?after=N`, `POST /api/command`; command POST enqueues,
-  UI polls history (no cross-loop futures). 127.0.0.1 only.
+  `GET /api/history?after=N`, `GET/POST /api/llm`, `POST /api/command`;
+  command POST enqueues, UI polls history (no cross-loop futures). 127.0.0.1
+  by default.
 - [x] **W4. Integration** — `live_pipeline.py` records outcomes into event
   memory; `demo_sc2.py` gains `--llm` and `--gui [PORT]` flags (work in
   dry-run AND live mode); package exports; full suite green.

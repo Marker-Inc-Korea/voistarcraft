@@ -14,7 +14,7 @@ planned as semantic actions, and executed through game API boundaries.
 | Dry-run SC2 pipeline | Implemented and tested. Runs without StarCraft II. |
 | Live SC2 mode | Implemented and locally connected through python-sc2. |
 | Voice input | Implemented behind optional `[voice]` dependencies. |
-| LLM command interpreter | Required for live SC2 mode; uses `[llm]` dependencies and Anthropic API key. |
+| LLM command interpreter | Required for live SC2 mode; uses `[llm]` dependencies. OpenAI/GPT is the default; Anthropic is still supported. |
 | Web GUI | Implemented as a localhost-first stdlib server with token-protected network mode. |
 | Event memory | Implemented and used by state reports and GUI history. |
 | Standing orders | Implemented for continuous SCV production and supply-block prevention. |
@@ -24,11 +24,11 @@ Current offline verification:
 
 ```bash
 python3 -m pytest -q
-# 812 passed, 1759 subtests passed
+# 820 passed, 4 skipped, 1763 subtests passed
 ```
 
-The suite does not require StarCraft II, `burnysc2`, BWAPI, Anthropic
-credentials, or audio hardware.
+The suite does not require StarCraft II, `burnysc2`, BWAPI, LLM credentials,
+or audio hardware.
 
 ## Quickstart
 
@@ -103,7 +103,7 @@ source .venv/bin/activate
 pip install -e .              # core: dry-run, interpreter, validators, planners
 pip install -e '.[sc2]'       # live SC2 mode via burnysc2
 pip install -e '.[voice]'     # Korean push-to-talk via faster-whisper + sounddevice
-pip install -e '.[llm]'       # required Anthropic LLM interpreter for live play
+pip install -e '.[llm]'       # required LLM interpreter for live play
 pip install -e '.[dev]'       # pytest
 ```
 
@@ -114,9 +114,8 @@ Live SC2 also requires a local StarCraft II installation and maps. See
 
 ### Dry-Run
 
-No StarCraft II required. Default dry-run uses the LLM path when
-`ANTHROPIC_API_KEY` is available; use `--no-llm` for offline deterministic
-development:
+No StarCraft II required. Default dry-run uses the LLM path when a provider
+API key is available; use `--no-llm` for offline deterministic development:
 
 ```bash
 python3 -m starcraft_commander.demo_sc2 --dry-run --no-llm
@@ -139,7 +138,6 @@ python3 -m starcraft_commander.demo_sc2 --dry-run --gui 0
 For actual local play:
 
 ```bash
-export ANTHROPIC_API_KEY=...
 SC2PATH="/Users/jinminseong/Desktop/StarCraft2/StarCraft II" \
 python3 -m starcraft_commander.demo_sc2 \
   --map AcropolisLE --difficulty easy \
@@ -149,12 +147,13 @@ python3 -m starcraft_commander.demo_sc2 \
 Open the printed `http://127.0.0.1:PORT` URL on the same Mac. If StarCraft II
 is exclusive fullscreen, local GUI typing requires switching focus away from
 the game; use windowed/borderless mode or a second monitor for stable local
-GUI control.
+GUI control. Enter your OpenAI API key in the web GUI's **LLM 설정** panel; the
+key is kept only in the running Python process memory and is never written to
+repo files or returned by `/api/llm`.
 
 For phone/tablet companion control on the same Wi-Fi:
 
 ```bash
-export ANTHROPIC_API_KEY=...
 SC2PATH="/Users/jinminseong/Desktop/StarCraft2/StarCraft II" \
 python3 -m starcraft_commander.demo_sc2 \
   --map AcropolisLE --difficulty easy \
@@ -167,15 +166,19 @@ Open the printed `http://0.0.0.0:PORT/?token=...` URL by replacing
 
 ### LLM Interpreter
 
-Live SC2 mode requires the Anthropic-backed hybrid interpreter. Rules still
-run first, and the LLM is used only for unsupported or ambiguous user
-utterances, once per user command. It is never called per game frame.
+Live SC2 mode requires the hybrid interpreter. Rules still run first, and the
+LLM is used only for unsupported or ambiguous user utterances, once per user
+command. It is never called per game frame.
 
 ```bash
-export ANTHROPIC_API_KEY=...
+export OPENAI_API_KEY=...
 python3 -m starcraft_commander.demo_sc2 --dry-run
 python3 -m starcraft_commander.demo_sc2 --dry-run --gui
 ```
+
+The live web GUI can also set the key after startup. Defaults are
+`--llm-provider openai` and `--llm-model gpt-4.1-mini`; Anthropic remains
+available with `--llm-provider anthropic`.
 
 LLM output is schema-gated to the 10 canonical intents and revalidated before
 execution.
@@ -213,9 +216,11 @@ python3 -m starcraft_commander.demo_sc2 --map AcropolisLE --difficulty easy --vo
 python3 -m starcraft_commander.demo_sc2 --map AcropolisLE --difficulty easy --gui
 ```
 
-This path is implemented but has not yet been verified against a real local
-SC2 installation in this development environment. Follow
-[docs/sc2-smoke-test.md](docs/sc2-smoke-test.md) for the first real smoke test.
+This path has been locally smoke-tested against the StarCraft II install at
+`/Users/jinminseong/Desktop/StarCraft2/StarCraft II` with `AcropolisLE`,
+including the localhost GUI, state polling, OpenAI key status, SCV production,
+SCV scouting, mineral gathering, and Supply Depot construction commands. Follow
+[docs/sc2-smoke-test.md](docs/sc2-smoke-test.md) to repeat the test.
 
 ## Supported Intents
 
@@ -223,12 +228,12 @@ The MVP supports 10 canonical intents:
 
 | Intent | Examples |
 | --- | --- |
-| `GATHER_RESOURCE` | "SCV 4기 미네랄 캐" |
+| `GATHER_RESOURCE` | "SCV 4기 미네랄 캐", "자원채취" |
 | `BUILD_STRUCTURE` | "보급고 지어", "배럭 지어" |
-| `TRAIN_WORKER` | "SCV 계속 찍어", "일꾼 두 기 뽑아" |
+| `TRAIN_WORKER` | "SCV 계속 찍어", "일꾼 두 기 뽑아", "SCV 여러개 뽑아" |
 | `TRAIN_ARMY` | "마린 3기 뽑아" |
-| `SCOUT` | "적 본진 정찰 보내" |
-| `SUMMARIZE_STATE` | "상황 보고해줘" |
+| `SCOUT` | "적 본진 정찰 보내", "정찰보내" |
+| `SUMMARIZE_STATE` | "상황 보고해줘", "상태확인" |
 | `DEFEND` | "마린 6기 입구로 보내" |
 | `REPAIR` | "SCV 2기로 벙커 수리해" |
 | `EXPAND` | "앞마당 가져가" |
@@ -267,7 +272,7 @@ Important modules:
 - `starcraft_commander/event_memory.py` — bounded thread-safe command history.
 - `starcraft_commander/standing_orders.py` — per-frame code policies, never LLM.
 - `starcraft_commander/web_gui.py` — localhost-first stdlib web UI.
-- `starcraft_commander/llm_interpreter.py` — schema-gated Anthropic interpreter.
+- `starcraft_commander/llm_interpreter.py` — schema-gated OpenAI/Anthropic interpreter.
 - `broodwar_commander/bw_executor.py` — BWAPI-style semantic plans and executor.
 
 Detailed design docs:
@@ -300,7 +305,7 @@ Check import hygiene:
 
 ```bash
 .venv/bin/python -c "import starcraft_commander, toycraft_commander, broodwar_commander; print('imports-ok')"
-.venv/bin/python -c "import json, sys; import starcraft_commander, broodwar_commander; print(json.dumps([m for m in ['sc2','anthropic','faster_whisper','sounddevice'] if m in sys.modules]))"
+.venv/bin/python -c "import json, sys; import starcraft_commander, broodwar_commander; print(json.dumps([m for m in ['sc2','anthropic','openai','faster_whisper','sounddevice'] if m in sys.modules]))"
 ```
 
 Expected output for the second command is `[]`.
@@ -309,6 +314,6 @@ Expected output for the second command is `[]`.
 
 These require external software and are intentionally not claimed as completed:
 
-- Run the live SC2 smoke test on a machine with StarCraft II and maps installed.
 - Build and validate a real BWAPI binding adapter on a Brood War + BWAPI setup.
-- Run a live Anthropic API check with `ANTHROPIC_API_KEY`.
+- Run broader live LLM checks across OpenAI and Anthropic models beyond the
+  local web-key configuration smoke test.
