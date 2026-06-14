@@ -719,8 +719,18 @@ var logBox = document.getElementById("log");
 var currentLang = "ko";
 var llmConfigured = false;
 var MAX_CHAT_EVENTS = 80;
+var COMPACT_AFTER_EVENTS = 48;
+var COMPACT_KEEP_EVENTS = 24;
 var trimmedChatEvents = 0;
 var recentEvents = [];
+var compactedContext = {
+  total: 0,
+  successful: 0,
+  failed: 0,
+  readOnly: 0,
+  commands: [],
+  lastNarration: ""
+};
 var pendingCommandSeq = 0;
 var pendingNodes = {};
 var latestState = null;
@@ -756,6 +766,7 @@ var I18N = {
     briefingCurrentStrategy: "현재 전략",
     briefingProgress: "진행 상황",
     briefingRisk: "리스크",
+    briefingMemory: "압축 메모리",
     briefingAdvice: "추천 보기",
     strategyOpening: "아직 명령 기록이 부족합니다. 현재는 전장 상태 파악 단계입니다.",
     strategyEconomy: "경제와 생산 기반을 안정화하는 전략을 펼치고 있습니다.",
@@ -763,6 +774,8 @@ var I18N = {
     strategyScout: "정보 우위를 확보하기 위해 정찰 중심 운영을 펼치고 있습니다.",
     strategyDefense: "본진 방어와 생존을 우선하는 전략을 펼치고 있습니다.",
     progressRecent: "최근 명령",
+    compactedNone: "아직 압축된 이전 맥락은 없습니다.",
+    compactedSummary: "이전 대화/명령 {total}건 압축됨. 성공/정보 {successful}건, 차단/확인필요 {failed}건.",
     riskNoArmy: "방어 병력이 없어 초반 공격에 취약합니다.",
     riskNoScout: "적 정보가 부족합니다.",
     riskSupply: "보급 여유가 낮습니다.",
@@ -825,6 +838,7 @@ var I18N = {
     briefingCurrentStrategy: "Current Strategy",
     briefingProgress: "Progress",
     briefingRisk: "Risk",
+    briefingMemory: "Compacted Memory",
     briefingAdvice: "Show Advice",
     strategyOpening: "Not enough command history yet. Current mode is battlefield assessment.",
     strategyEconomy: "You are stabilizing economy and production foundations.",
@@ -832,6 +846,8 @@ var I18N = {
     strategyScout: "You are playing for information advantage through scouting.",
     strategyDefense: "You are prioritizing main-base defense and survival.",
     progressRecent: "Recent commands",
+    compactedNone: "No older context has been compacted yet.",
+    compactedSummary: "{total} older command/chat events compacted. Successful/info {successful}, blocked/needs-clarification {failed}.",
     riskNoArmy: "No army is available, making early pressure dangerous.",
     riskNoScout: "Enemy information is limited.",
     riskSupply: "Supply buffer is low.",
@@ -894,6 +910,7 @@ var I18N = {
     briefingCurrentStrategy: "当前战略",
     briefingProgress: "进度",
     briefingRisk: "风险",
+    briefingMemory: "压缩记忆",
     briefingAdvice: "查看建议",
     strategyOpening: "命令记录还不足。目前处于战场评估阶段。",
     strategyEconomy: "你正在稳定经济和生产基础。",
@@ -901,6 +918,8 @@ var I18N = {
     strategyScout: "你正在通过侦察获取情报优势。",
     strategyDefense: "你正在优先保护主基地并确保生存。",
     progressRecent: "最近命令",
+    compactedNone: "还没有压缩的旧上下文。",
+    compactedSummary: "已压缩 {total} 条较早对话/命令。成功/信息 {successful} 条，阻塞/需确认 {failed} 条。",
     riskNoArmy: "当前没有部队，容易受到早期压制。",
     riskNoScout: "敌方情报不足。",
     riskSupply: "补给余量偏低。",
@@ -988,9 +1007,7 @@ function trimChatLog() {
 function appendLog(ev) {
   if (ev && typeof ev.seq === "number") {
     recentEvents.push(ev);
-    if (recentEvents.length > MAX_CHAT_EVENTS) {
-      recentEvents = recentEvents.slice(recentEvents.length - MAX_CHAT_EVENTS);
-    }
+    compactRecentEventsIfNeeded();
     removePendingForCommand(ev.command_text || "");
   }
   var entry = document.createElement("div");
@@ -1024,6 +1041,34 @@ function appendLog(ev) {
   trimChatLog();
   logBox.scrollTop = logBox.scrollHeight;
   if (latestState) { renderStrategyBriefing(latestState); }
+}
+
+function compactRecentEventsIfNeeded() {
+  if (recentEvents.length <= COMPACT_AFTER_EVENTS) { return; }
+  var compactCount = recentEvents.length - COMPACT_KEEP_EVENTS;
+  var toCompact = recentEvents.slice(0, compactCount);
+  recentEvents = recentEvents.slice(compactCount);
+  toCompact.forEach(function (ev) {
+    compactedContext.total += 1;
+    if (["executed", "partially_executed", "read_only"].indexOf(ev.status) >= 0) {
+      compactedContext.successful += 1;
+    }
+    if (["blocked", "clarification"].indexOf(ev.status) >= 0) {
+      compactedContext.failed += 1;
+    }
+    if (ev.status === "read_only") {
+      compactedContext.readOnly += 1;
+    }
+    if (ev.command_text) {
+      compactedContext.commands.push(String(ev.command_text));
+      if (compactedContext.commands.length > 12) {
+        compactedContext.commands = compactedContext.commands.slice(-12);
+      }
+    }
+    if (ev.narration) {
+      compactedContext.lastNarration = String(ev.narration).slice(0, 220);
+    }
+  });
 }
 
 function appendPendingCommand(text) {
@@ -1157,12 +1202,14 @@ function renderStrategyBriefing(data) {
   var recentTexts = recentEvents.slice(-5).map(function (ev) {
     return ev.command_text || "";
   }).filter(Boolean);
+  var compactedTexts = compactedContext.commands.slice(-5);
+  var strategyTexts = compactedTexts.concat(recentTexts);
   var successful = recentEvents.filter(function (ev) {
     return ["executed", "partially_executed", "read_only"].indexOf(ev.status) >= 0;
-  }).length;
+  }).length + compactedContext.successful;
   var failed = recentEvents.filter(function (ev) {
     return ["blocked", "clarification"].indexOf(ev.status) >= 0;
-  }).length;
+  }).length + compactedContext.failed;
   var suggestions = [];
   if ((data.supply_left || 0) <= 2) { suggestions.push(t("briefingSuggestionSupply")); }
   if (enemyUnits + enemyStructures === 0) { suggestions.push(t("briefingSuggestionScout")); }
@@ -1173,7 +1220,7 @@ function renderStrategyBriefing(data) {
   if (enemyUnits + enemyStructures === 0) { risks.push(t("riskNoScout")); }
   if ((data.supply_left || 0) <= 2) { risks.push(t("riskSupply")); }
   if (!risks.length) { risks.push(t("riskStable")); }
-  var strategy = inferStrategy(recentTexts, structures);
+  var strategy = inferStrategy(strategyTexts, structures);
   var enemyLine = enemyUnits + enemyStructures > 0
     ? enemyUnits + " / " + enemyStructures
     : t("briefingEnemyNone");
@@ -1189,6 +1236,7 @@ function renderStrategyBriefing(data) {
     t("progressRecent") + ": " + (recentTexts.length ? recentTexts.join(" / ") : "-") + "\n" +
     "OK/Needs attention: " + successful + " / " + failed
   ));
+  briefing.appendChild(briefingBlock(t("briefingMemory"), compactedContextSummary()));
   briefing.appendChild(briefingBlock(t("briefingRisk"), risks.join("\n")));
   var details = document.createElement("details");
   var summary = document.createElement("summary");
@@ -1199,6 +1247,23 @@ function renderStrategyBriefing(data) {
   advice.textContent = suggestions.join("\n");
   details.appendChild(advice);
   briefing.appendChild(details);
+}
+
+function compactedContextSummary() {
+  if (compactedContext.total < 1) {
+    return t("compactedNone");
+  }
+  var summary = t("compactedSummary")
+    .replace("{total}", String(compactedContext.total))
+    .replace("{successful}", String(compactedContext.successful))
+    .replace("{failed}", String(compactedContext.failed));
+  if (compactedContext.commands.length) {
+    summary += "\n" + t("progressRecent") + ": " + compactedContext.commands.slice(-5).join(" / ");
+  }
+  if (compactedContext.lastNarration) {
+    summary += "\n" + compactedContext.lastNarration;
+  }
+  return summary;
 }
 
 function inferStrategy(recentTexts, structures) {
